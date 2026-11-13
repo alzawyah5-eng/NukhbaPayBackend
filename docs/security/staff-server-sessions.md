@@ -1,5 +1,7 @@
 # Nukhbapay local staff HTTPS and server sessions
 
+Track B source update: [Auth0 login contract](staff-auth0-login.md) implements the gated browser flow and documents its configuration and synthetic tests. The foundation description below records the earlier increment; CLI/runtime activation remains disabled.
+
 This is the local, synthetic Brick 3C foundation (ADR 0022), not real Auth0 login or operational staff access. The API stays on `127.0.0.1:3000`. The new BFF uses `https://localhost:3001`, bound only to IPv4 loopback. Browser sign-in remains unavailable. The owner explicitly chose to leave Windows trust unchanged; no CurrentUser Root entry is installed. Strict per-client public-certificate pinning is supported, while browser trust remains unverified. Auth0 resources reported by the owner (US-5 development, RFC 9068, RS256, Always MFA, OTP/recovery) were not contacted or configured by this increment.
 
 ## Run the local HTTPS portal

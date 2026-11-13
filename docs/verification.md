@@ -1,5 +1,13 @@
 # Verification record
 
+## Track B Auth0 browser login source acceptance
+
+13 November 2026, Asia/Dubai; branch `brick3/auth0-login`. Implemented gated BFF authorization-code login with S256 PKCE, one-use state/nonce/browser transactions, exact callback and token trust validation, signed fresh MFA checks, existing trusted staff/tenant/session binding, rotation and CSRF-protected local/provider logout handoff. See [configuration and security contract](security/staff-auth0-login.md).
+
+Final logical results: **156 tests passed, zero failed/cancelled/skipped**: BFF authentication/pinned HTTPS 14; application 94; API authentication/runtime 48. Commands: `pnpm.cmd staff:test` (existing protected localhost certificate supplied process-only), `pnpm.cmd application:test`, `pnpm.cmd api:test`. `pnpm.cmd staff:build`, `pnpm.cmd staff:typecheck`, recursive API/dependency builds and `git diff --check` passed. Tests use synthetic identities, actual RSA signature verification and mocked Auth0 responses. An initial cookie-attribute assertion used the extracted cookie value; the fixture was corrected before passing verification.
+
+CLI login/session activation remains disabled. No real Auth0 exchange, staff onboarding, persistent database/IAM deployment, PostgreSQL authentication, migration, trust-store change, dashboard UI or privileged operation was performed. Real provider profile/MFA emission, exact registration/secrets, browser TLS trust and approved operational composition remain pending. This is source acceptance only; stop for review.
+
 ## Brick 4A controlled draft publication acceptance
 
 Date: 13 November 2026, Asia/Dubai. Scope: synthetic immutable draft candidates and proposed migration 007 on generated disposable PostgreSQL only. No provider connection, deployed endpoint, publication activation, payment, Auth0 change or persistent migration.

@@ -3,7 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "exports": { "./portal": { "types": "./dist/portal.d.ts", "import": "./dist/portal.js" } },
+  "exports": {
+    "./portal": { "types": "./dist/portal.d.ts", "import": "./dist/portal.js" },
+    "./auth0": { "types": "./dist/auth0.d.ts", "import": "./dist/auth0.js" }
+  },
   "description": "Local HTTPS staff BFF; real login and session activation remain disabled.",
   "engines": { "node": ">=24 <25" },
   "scripts": {
@@ -12,5 +15,6 @@
     "test": "tsc -p tsconfig.test.json && node --test dist-test/test/*.spec.js",
     "start": "node dist/main.js"
   },
+  "dependencies": { "@nukhbapay/application": "workspace:*", "jose": "6.2.17" },
   "devDependencies": { "@types/node": "24.19.2", "typescript": "6.0.2" }
 }

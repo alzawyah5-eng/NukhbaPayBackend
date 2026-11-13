@@ -7,12 +7,12 @@ import { attestVerifiedStaffIdentity } from "../src/identity/verified-staff-iden
 import type { StaffAuthorizationRepository, ResolvedStaffPrincipal, StaffMembershipStatus } from "../src/identity/staff-access.js";
 
 const staff="00000000-0000-4000-8000-000000000001",tenant="00000000-0000-4000-8000-000000000002";
-function fixture() {
+function fixture(options:{issuer?:string;sessionIssuers?:readonly string[]}={}) {
   let now=Date.UTC(2026,10,12),version=1n,status:ResolvedStaffPrincipal['staffStatus']='ACTIVE',membership:StaffMembershipStatus='ACTIVE',auditFailure=false;
   const repository:StaffAuthorizationRepository={findByTrustedIdentity:async identity=>identity.subject==='unit-staff'?{staffId:staff,staffStatus:status,identityStatus:'ACTIVE',tokensValidAfter: null, authzVersion:version}:null,
     findPlatformRoleGrants:async()=>[],findTenantMembership:async(_staff,id)=>id===tenant?{membershipId:tenant,tenantId:tenant,status:membership,version:1n,roleGrants:[]}:null};
-  const actors=new TrustedStaffActorBoundary({repository,now:()=>new Date(now),auditWriter:{appendSecurityAuditEvents:async()=>{if(auditFailure)throw new Error('Private audit fault');}}});
-  const identity=()=>attestVerifiedStaffIdentity({issuer:'https://sessions.synthetic.invalid/',subject:'unit-staff',security:{audience:'urn:nukhbapay:synthetic:staff-api',clientId:'unit',profile:'rfc9068-staff-v1',principalKind:'human',issuedAt:now/1000,expiresAt:now/1000+300,assurance:'not-established'}});
+  const actors=new TrustedStaffActorBoundary({repository,now:()=>new Date(now),...(options.sessionIssuers===undefined?{}:{sessionIssuers:options.sessionIssuers}),auditWriter:{appendSecurityAuditEvents:async()=>{if(auditFailure)throw new Error('Private audit fault');}}});
+  const identity=()=>attestVerifiedStaffIdentity({issuer:options.issuer??'https://sessions.synthetic.invalid/',subject:'unit-staff',security:{audience:'urn:nukhbapay:synthetic:staff-api',clientId:'unit',profile:'rfc9068-staff-v1',principalKind:'human',issuedAt:now/1000,expiresAt:now/1000+300,assurance:'not-established'}});
   const rows=new Map<string,{binding:string;expires:number;last:number;revoked:boolean}>();let events=0,unavailable=false;
   const store:StaffSessionStore={execute:async(t:StaffSessionTicket):Promise<SessionStoreOutcome>=>{
     if(!consumeStaffSessionTicket(t))return 'DENIED';if(unavailable)return 'UNRESOLVED';
@@ -51,6 +51,14 @@ test('session credentials have 256-bit entropy format, hash-only storage, safe s
   assert.equal(a.credential.cookieValue()!==b.credential.cookieValue(),true);
   for(const text of [JSON.stringify(a),inspect(a),String(a.credential),JSON.stringify([...f.rows])])assert.equal(text.includes(a.credential.cookieValue()),false);
   assert.deepEqual(await service.validate(a.credential.cookieValue()),{ok:true,execution:'NOT_AUTHORIZED',assurance:'not-established'});
+});
+
+test('reviewed session issuers are exact trusted composition inputs; defaults remain synthetic-only',async()=>{
+  const issuer='https://development.auth0.example/';
+  for(const options of [{issuer},{issuer,sessionIssuers:['https://other.auth0.example/']},{sessionIssuers:[]}]) {
+    const f=fixture(options);assert.equal((await f.make().create(await f.actor())).ok,false);assert.equal(f.rows.size,0);
+  }
+  const f=fixture({issuer,sessionIssuers:[issuer]});assert.equal((await f.make().create(await f.actor())).ok,true);
 });
 test('idle and absolute boundaries are exclusive and activity cannot extend absolute expiry',async()=>{
   const f=fixture(),service=f.make(),created=await token(service,await f.actor()),raw=created.credential.cookieValue();

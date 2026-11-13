@@ -112,6 +112,8 @@ export class TrustedStaffActorBoundary {
   readonly #workflowCursors = new WeakMap<object,{actor:TrustedStaffActor;query:string;position:WorkflowPosition;expiresAtMs:number}>();
   constructor(private readonly dependencies: {
     repository: StaffAuthorizationRepository; auditWriter: SecurityAuditWriter; now: () => Date;
+    /** Reviewed BFF issuer allowlist, trusted composition only. Default remains synthetic-only. */
+    sessionIssuers?: readonly string[];
     requests?: { find(id: string, tenantId?: string): Promise<ApprovalRequestSnapshot | null> };
     syntheticReceipts?: SyntheticReceiptAcceptance;
     syntheticRequests?: SyntheticStaffRequestStore;
@@ -159,7 +161,7 @@ export class TrustedStaffActorBoundary {
     try {
     const { context, binding } = await this.#fresh(actor);
     const now = this.dependencies.now().getTime();
-    if (!new URL(binding.identity.issuer).hostname.endsWith(".invalid") ||
+    if (!(this.dependencies.sessionIssuers?.includes(binding.identity.issuer) ?? new URL(binding.identity.issuer).hostname.endsWith(".invalid")) ||
       !authorizeStaffAccess(context, { permissionCode: "staff.self.read", scope: "SELF",
         targetStaffId: context.principal!.staffId, now: new Date(now).toISOString() }).allowed) return null;
     const digest = (c: StaffAuthorizationContext, time: number) => canonicalDigest([staffAuthorityDigest(c),
