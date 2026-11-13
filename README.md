@@ -1,5 +1,7 @@
 # Nukhbapay
 
+13 November 2026: the final [browser/BFF security structure gate](docs/security/browser-bff-boundary.md) is verified, closing the three-branch local integration blocker. Structure validation requires the existing installed Node/TypeScript workspace tools as well as Python; it installs nothing. Local development acceptance is GO. Real Auth0 login, persistent IAM and privileged staff operations remain disabled.
+
 13 November 2026 Brick 4A: [ADR 0026](docs/adr/0026-draft-catalogue-publication-candidates.md) adds deterministic immutable catalogue publication **drafts** from explicit synthetic snapshots. Candidates are always non-authorized and cannot be activated. Proposed migration 007 is unregistered, disposable-only and unapplied to development. No public catalogue route, live provider, real staff permission, quote, order or payment was added.
 
 13 November 2026 registration: [ADR 0024](docs/adr/0024-registered-staff-session-migration.md) registers the already accepted transactional migration 006 wrapper in local source history. The reviewed SQL sidecars and frozen 004/005 migrations are unchanged. `pnpm db:verify:sources` is connection-free; guarded `db:migrate` and combined acceptance accept only verified random disposable targets and now execute registered 001–006. Nothing was applied to `nukhabapay_dev`.

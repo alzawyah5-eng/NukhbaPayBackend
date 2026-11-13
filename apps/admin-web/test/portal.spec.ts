@@ -182,7 +182,8 @@ test('combined Auth0 and actual built assets preserve callback, preview isolatio
       assert.ok(landing.body.includes(f.login.logoutUrl.replaceAll('&','&amp;')));
       assert.equal(landing.body.includes('synthetic-secret-'),false);
       assert.equal((await call(origin,'/staff','GET',{'sec-fetch-site':'cross-site'})).status,403);
-      for(const url of ['/preview','/preview/overview',...demoPaths,'/frontend-handover/nukhbapay-staff-react/index.html'])
+      for(const url of ['/preview','/preview/overview',...demoPaths,'/frontend-handover/nukhbapay-staff-react/index.html',
+        '/browser-boundary-report.json','/.vite/manifest.json','/src/auth0.ts','/test/fixtures/auth0-fixture.ts'])
         assert.equal((await call(origin,url)).status,404,url);
       const start=await call(origin,'/auth/login');assert.equal(start.status,303);
       const auth=new URL(start.headers.location!),transaction=start.headers['set-cookie']![0]!.split(';')[0]!;

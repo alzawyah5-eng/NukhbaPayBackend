@@ -4,6 +4,7 @@ from pathlib import Path
 import json
 import re
 import sys
+import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 REQUIRED = [
@@ -73,7 +74,16 @@ for path in (ROOT / "packages").rglob("*.ts"):
         if any(any(item in value for item in forbidden) for value in imports):
             errors.append(f"Domain imports infrastructure: {path.relative_to(ROOT)}")
 
-for client in ["admin-web", "mobile", "kiosk-client"]:
+# admin-web contains a trusted Node BFF and an untrusted browser client. Its
+# compiler-parsed, transitive graph is checked separately; no basename exemptions.
+boundary = subprocess.run(
+    ["node", str(ROOT / "scripts/browser-boundary.mjs")],
+    cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
+)
+if boundary.returncode:
+    errors.append("Browser/BFF boundary rejected:\n" + boundary.stderr.strip())
+
+for client in ["mobile", "kiosk-client"]:
     for path in (ROOT / "apps" / client).rglob("*"):
         if any(part in {"node_modules", "__pycache__", "dist", "dist-test"} for part in path.parts):
             continue

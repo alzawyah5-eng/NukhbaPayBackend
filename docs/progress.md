@@ -1,6 +1,12 @@
 # Implementation progress
 
-## Current increment: controlled A/B/C local integration
+## Current increment: final browser/BFF structure security gate
+
+13 November 2026: **COMPLETE; GO for integrated local Brick 3 development acceptance.** The structure checker now recognizes the trusted Node BFF compiler boundary while parsing and resolving every browser module and its transitive shared dependencies. Unknown admin-web directories remain untrusted. The Vite build independently checks its actual graph and emitted text; no filename exception or broad admin-web exemption was added. Existing package/domain/mobile/kiosk/public-schema assertions remain enforced.
+
+Validation passed: 56 positive/negative browser-boundary tests, 10 legacy-structure tests and 22 staff security/HTTPS tests (88 total, zero failed/cancelled/skipped), staff build/typecheck, production graph/output verification and the final Python structure command. The actual graph contains 1,600 modules with no BFF/privileged backend modules. Migration source verification passed unchanged. No dependencies, migrations, database state, Auth0 configuration, reserved permission or financial behavior changed. The preceding 398-test integration evidence remains historical evidence and was not needlessly rerun in this focused correction. Real login, persistent IAM and privileged staff operations remain disabled. See [the boundary policy](security/browser-bff-boundary.md) and current verification record.
+
+## Previous increment: controlled A/B/C local integration
 
 13 November 2026: **MERGES COMPLETE; INTEGRATED ACCEPTANCE NO-GO.** All three reviewed branch histories are merged locally in A/B/C order, with explicit historical checkout-byte rules and safe provider-logout integration. All 398 distinct executable tests passed with zero failed/cancelled/skipped cases, including the complete disposable catalogue/IAM/session/restore regression. Persistent development history remained 001-003 and database/role inventories were restored. The final required structure check failed because its generic admin-web client rule includes the trusted Node BFF and server test fixtures. The checker remains unchanged; no exemption, rollback or additional implementation was attempted after that gate. See [the integration record](security/three-branch-integration.md) for exact commits, dependency approvals, conflict resolutions, commands and the required narrowly reviewed architecture-check correction. Persistent IAM, real Auth0 login, staff mutations, accepted privileged approvals and financial execution remain disabled.
 

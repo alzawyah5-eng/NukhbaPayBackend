@@ -1,5 +1,7 @@
 # Controlled three-branch local integration
 
+Follow-up, 13 November 2026: the final structure-gate correction is now verified. **Current verdict: GO for integrated local development acceptance; operational activation remains NO-GO.** The directory/entry-based BFF classification, transitive browser import audit and production build graph guard pass 56 boundary tests, 10 preserved-rule tests and all 22 staff tests. The earlier failure and stopping decision below remain historical evidence. See [the implemented security boundary](browser-bff-boundary.md) and latest verification record.
+
 13 November 2026, Asia/Dubai. Baseline: `560e12bb90bbc79073858c05ad77149240a40a71`.
 
 ## History and scope

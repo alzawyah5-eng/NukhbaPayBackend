@@ -1,5 +1,24 @@
 # Verification record
 
+## Final browser/BFF structure security gate
+
+13 November 2026, Asia/Dubai. **PASS; integrated local development acceptance GO.** Root cause was a generic rule treating the complete admin-web tree as browser code despite its reviewed Node BFF. The replacement verifies the compiler/build entry boundary, parses browser imports with the existing pinned TypeScript API, resolves transitive aliases/shared dependencies and rejects privileged crossings. All unknown admin-web source directories default to browser classification; the three originally reported filenames have no individual exemptions. Existing non-admin assertions remain unchanged and have dedicated regression tests.
+
+| Command | Actual result |
+| --- | --- |
+| `python -B scripts/check_structure.py` | Passed; 30 JSON files and all existing inventory/package/public/domain/client assertions plus the real browser graph gate |
+| `node --test scripts/test/browser-boundary.test.mjs` | 56 passed, 0 failed/cancelled/skipped; positive BFF/pure shared graphs and negative entry/component/utility/unclassified/transitive/relative/package/alias/Node/environment/credential/build cases |
+| `python -B -m unittest discover -s scripts/test -p test_structure_legacy.py -v` | 10 passed; preserved package, JSON, domain, mobile, kiosk and public financial field restrictions |
+| `pnpm.cmd staff:build` | Passed with source and actual Rollup graph guard enabled |
+| `pnpm.cmd staff:typecheck` | Passed for BFF and browser |
+| `pnpm.cmd staff:test` | 22 passed, 0 failed/cancelled/skipped; includes denial of boundary-report/manifest/BFF-source/fixture HTTP requests |
+| `node scripts/browser-boundary.mjs --verify-build` | Passed: 12 authored browser modules plus actual production graph of 1,600 modules and emitted text; zero BFF/privileged backend modules or credential evidence |
+| `pnpm.cmd db:verify:sources` | Passed, connection-free; no migration or manifest changes |
+
+**88 tests passed in this increment. No negative security test failed.** The production JS/CSS asset names and bytes remained stable while the build added non-served graph evidence. TLS tests generated temporary localhost-only keys/certificates and pinned the exact certificate per client with verification enabled; temporary material was removed and Windows trust was unchanged. The build ran outside the filesystem sandbox required by Vite; no installation, database connection, operational identity or provider configuration was needed.
+
+The Python legacy tests mock only the separately tested Node graph subprocess in isolated temporary fixtures; production checking always runs the real graph audit. No test-mode production switch exists. No full financial/database suite was rerun: the previous 398-test combined acceptance evidence is preserved below, and this focused tooling correction changes neither their source nor runtime behavior. See [the exact boundary policy and scope](security/browser-bff-boundary.md).
+
 ## Controlled three-branch local integration
 
 13 November 2026, Asia/Dubai. Track A merge `2bd5993`, checkout-byte fix `e2db251`, Track B merge `56d13ef`, and resolved Track C merge `5e7e932` preserve all three reviewed histories. The [integration record](security/three-branch-integration.md) contains exact full commit IDs, protected-byte policy, dependency approval and logout/preview resolution details.

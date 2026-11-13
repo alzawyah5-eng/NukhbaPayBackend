@@ -1,5 +1,9 @@
 # Security requirements register
 
+## Browser/BFF structure boundary — 13 November 2026
+
+The trusted staff BFF source/server tests and browser build are explicitly classified by their compiler/entry directories. Browser roots include all unknown admin-web source directories. The structure gate must parse direct/type/dynamic/re-export dependencies, follow resolved relative and alias/shared graphs and reject any path into BFF/test/build/backend or Node-only authority. Browser environment access, secret material and opaque loaders fail closed. Vite must independently enforce the actual module graph and inspect emitted text. Neither build metadata nor server sources may be served. Missing/unreviewed config or evidence must reject, not suppress checks. Existing mobile/kiosk/package/domain/public-field restrictions remain enforced. See [the executable policy and negative acceptance](browser-bff-boundary.md). This grants no runtime identity, IAM or staff execution authority.
+
 ## Brick 4A draft publication boundary
 
 - Candidate arithmetic must reuse exact minor-unit domain rules; floating-point financial arithmetic and AI/model arithmetic are prohibited.
