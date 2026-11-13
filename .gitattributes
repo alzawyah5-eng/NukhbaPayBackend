@@ -2,3 +2,13 @@
 packages/database/pending-migrations/004_identity_default_acl_preflight.sql text eol=lf
 packages/database/migrations/006_staff_server_sessions.ts text eol=lf
 packages/database/roles/grant_identity_validity_reader.sql text eol=lf
+# Historical manifest inputs hashed as CRLF bytes. Preserve their deployment bytes.
+packages/database/migrations/001_catalog.ts text eol=crlf
+packages/database/migrations/002_import_role_privileges.ts text eol=crlf
+packages/database/migrations/003_import_role_read_access.ts text eol=crlf
+packages/database/migrations/004_staff_identity_foundation.ts text eol=crlf
+packages/database/migrations/005_staff_workflow_persistence.ts text eol=crlf
+packages/database/pending-migrations/004_identity_activation_safeguards.sql text eol=crlf
+packages/database/pending-migrations/006_staff_server_sessions.sql text eol=crlf
+# Reviewed, unregistered Brick 4A candidate.
+packages/database/pending-migrations/007_catalogue_publication_drafts.sql text eol=lf
