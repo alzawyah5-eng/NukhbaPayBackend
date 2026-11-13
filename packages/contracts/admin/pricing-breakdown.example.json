@@ -1,0 +1,17 @@
+{
+  "example_only": true,
+  "product_id": "gift_brand_x_ae_100",
+  "currency": "AED",
+  "provider_id": "synthetic_a",
+  "provider_cost": "97.00",
+  "embedded_provider_discount": "3.00",
+  "customer_base_amount": "100.00",
+  "service_fee": "2.00",
+  "tax_amount": "0.00",
+  "total_amount": "102.00",
+  "payment_processing_cost": "1.73",
+  "agent_commission": "0.50",
+  "expected_contribution": "2.77",
+  "note": "Embedded discount is already reflected in provider cost. Zero tax is explicit illustrative input, not a tax classification."
+}
+

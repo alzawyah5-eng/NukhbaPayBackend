@@ -1,0 +1,16 @@
+{
+  "profile": "REGISTERED_MIGRATIONS_V1",
+  "status": "006_REGISTERED_LOCAL_SOURCE_HISTORY",
+  "files": {
+    "packages/database/migrations/001_catalog.ts": "3f26bf82ace865d086d2d2f5471a8db0c5544e6459ab388b69a26e093a59c09c",
+    "packages/database/migrations/002_import_role_privileges.ts": "520dfef71a3cc5fb741c87ebf509ed3d4299b84f15394112778db577ebb5ffae",
+    "packages/database/migrations/003_import_role_read_access.ts": "4960730b563c8b8912cb1edc23235df9aa0077a463c32f01bc5e5ede51cecf34",
+    "packages/database/migrations/004_staff_identity_foundation.ts": "ebb5b282d9afad7dc5ef7b8221bd7b34942c1cbb53757e73832987b36975b312",
+    "packages/database/migrations/005_staff_workflow_persistence.ts": "41910d1aa060a1971c8e33e123b0e350d884ffede490cb71b52dc00838779390",
+    "packages/database/pending-migrations/004_identity_default_acl_preflight.sql": "dcbae2df59a0240b092308856b4d481a10cb935dfcc68837f058b1bfa48a53aa",
+    "packages/database/pending-migrations/004_identity_activation_safeguards.sql": "ff8a9c7d36ad00baff7ec1e79655aed03358a606a3631d11cbce528e9a1595c8",
+    "packages/database/pending-migrations/006_staff_server_sessions.sql": "37c784fa25404b5d20ee9aa6856dba856a088dcc67f80c652680078637b01cc4",
+    "packages/database/migrations/006_staff_server_sessions.ts": "035fa9bb914de3cb4094f8e98ce2fa9164dc4e6b5e11b40ddfdd55707bc98eed",
+    "packages/database/roles/grant_identity_validity_reader.sql": "285bc7c6f91316869f4a88f9f582c5bb1bf4b68dc6824588bd95773e553f32a0"
+  }
+}

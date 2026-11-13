@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.nukhbapay.example/public/quote.v1.schema.json",
+  "title": "CustomerQuoteV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "quote_id",
+    "product_id",
+    "currency",
+    "base_amount",
+    "service_fee",
+    "tax_amount",
+    "total_amount",
+    "price_version",
+    "expires_at",
+    "status"
+  ],
+  "properties": {
+    "quote_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "product_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "currency": {
+      "type": "string",
+      "pattern": "^[A-Z]{3}$"
+    },
+    "base_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$"
+    },
+    "service_fee": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$"
+    },
+    "tax_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$"
+    },
+    "total_amount": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$"
+    },
+    "price_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "status": {
+      "const": "QUOTED"
+    }
+  },
+  "description": "Design contract for future persisted quotes; requires runtime currency, arithmetic, ownership and validity checks in addition to schema validation."
+}
+

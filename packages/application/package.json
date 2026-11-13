@@ -1,0 +1,26 @@
+{
+  "name": "@nukhbapay/application",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared application use cases and persistence ports.",
+  "exports": {
+    ".": {
+      "types": "./dist/application/src/index.d.ts",
+      "import": "./dist/application/src/index.js"
+    },
+    "./verified-identity": {
+      "types": "./dist/application/src/identity/verified-staff-identity.d.ts",
+      "import": "./dist/application/src/identity/verified-staff-identity.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "tsc -p tsconfig.test.json && node --test dist-test/application/test/*.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "6.0.2"
+  }
+}

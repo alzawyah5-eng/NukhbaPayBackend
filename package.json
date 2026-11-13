@@ -1,0 +1,42 @@
+{
+  "name": "nukhbapay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Architecture scaffold with synthetic pricing and advisory matching examples.",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "packageManager": "pnpm@10.34.9+sha512.f49b5a8ea0fdedb44bb3c0c1d6575092a53c2950d95b7ad15df11f17974877a2de3a01c07e934e9b28ce716e51c09a94962c7306d09be2e1e4b18a8c8762fd32",
+  "scripts": {
+    "demo": "node --experimental-strip-types scripts/demo.ts",
+    "test": "node --experimental-strip-types --test packages/domain/test/*.test.ts packages/provider-adapters/test/*.test.ts",
+    "test:ai": "python3 -m unittest discover -s apps/ai-service/tests -v",
+    "check:architecture": "python3 scripts/check_structure.py",
+    "api:build": "pnpm --filter @nukhbapay/api... -r build",
+    "api:typecheck": "pnpm --filter @nukhbapay/api typecheck",
+    "api:test": "pnpm --filter @nukhbapay/api test",
+    "api:start": "pnpm --filter @nukhbapay/api start",
+    "db:build": "pnpm --filter @nukhbapay/database build",
+    "db:typecheck": "pnpm --filter @nukhbapay/database typecheck",
+    "db:test": "pnpm --filter @nukhbapay/database test",
+    "db:migrate": "pnpm --filter @nukhbapay/database migrate",
+    "db:test:integration": "pnpm --filter @nukhbapay/database test:integration",
+    "application:build": "pnpm --filter @nukhbapay/application build",
+    "application:typecheck": "pnpm --filter @nukhbapay/application typecheck",
+    "application:test": "pnpm --filter @nukhbapay/application test",
+    "catalog:import:synthetic": "pnpm db:build && node --experimental-strip-types scripts/import-synthetic-catalog.ts",
+    "staff:build": "pnpm --filter @nukhbapay/admin-web build",
+    "staff:typecheck": "pnpm --filter @nukhbapay/admin-web typecheck",
+    "staff:test": "pnpm --filter @nukhbapay/admin-web test",
+    "staff:start": "pnpm --filter @nukhbapay/admin-web start",
+    "staff:sessions:test:integration": "pnpm --filter @nukhbapay/api test:session:integration",
+    "db:verify:sources": "node scripts/rehearse-reviewed-migrations.mjs --verify-only",
+    "db:preflight:persistent-development": "node scripts/persistent-development-iam.mjs --preflight",
+    "db:test:persistent-readiness": "node --test scripts/test/persistent-development-iam.test.mjs",
+    "db:test:persistent-readiness:disposable": "node scripts/test/run-disposable-persistent-readiness.mjs",
+    "db:test:combined": "pnpm --filter @nukhbapay/api test:migration:integration",
+    "catalogue:publication:test:integration": "node scripts/test/run-catalogue-publication-acceptance.mjs",
+    "catalogue:publication:test:regression": "node scripts/test/run-catalogue-publication-acceptance.mjs --regression"
+  }
+}

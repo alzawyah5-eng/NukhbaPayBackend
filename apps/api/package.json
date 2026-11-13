@@ -1,0 +1,40 @@
+{
+  "name": "@nukhbapay/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Minimal NestJS API foundation with process-liveness endpoint.",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "build": "nest build",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "pnpm --filter @nukhbapay/api... -r build && tsc -p tsconfig.test.json && node --test dist-test/test/*.spec.js",
+    "test:identity:integration": "pnpm --filter @nukhbapay/api... -r build && tsc -p tsconfig.test.json && node --test --test-concurrency=1 dist-test/test/internal-staff-access.integration.js dist-test/test/staff-http.integration.js dist-test/test/local-api-runtime.integration.js dist-test/test/staff-persistence.integration.js dist-test/test/migration005.integration.js",
+    "start": "node dist/main.js",
+    "test:session:integration": "pnpm --filter @nukhbapay/api... -r build && tsc -p tsconfig.test.json && node --test --test-concurrency=1 dist-test/test/staff-sessions.integration.js",
+    "test:migration:integration": "pnpm --filter @nukhbapay/api... -r build && tsc -p tsconfig.test.json && node --test --test-concurrency=1 dist-test/test/migration006.integration.js",
+    "test:catalogue-publication:integration": "pnpm --filter @nukhbapay/api... -r build && tsc -p tsconfig.test.json && node --test --test-concurrency=1 dist-test/test/catalogue-publication.integration.js"
+  },
+  "dependencies": {
+    "@nukhbapay/application": "workspace:*",
+    "@nukhbapay/database": "workspace:*",
+    "@nestjs/common": "12.4.2",
+    "@nestjs/core": "12.4.2",
+    "@nestjs/platform-express": "12.4.2",
+    "express": "5.3.0",
+    "jose": "6.2.17",
+    "reflect-metadata": "0.2.2",
+    "rxjs": "7.8.2"
+  },
+  "devDependencies": {
+    "@nukhbapay/admin-web": "workspace:*",
+    "@types/pg": "8.23.1",
+    "pg": "8.23.1",
+    "@nestjs/cli": "12.0.12",
+    "@types/express": "5.0.6",
+    "@types/node": "24.19.2",
+    "typescript": "6.0.2"
+  }
+}

@@ -1,0 +1,8 @@
+packages:
+  - 'apps/api'
+  - 'apps/admin-web'
+  - 'apps/worker'
+  - 'packages/*'
+engineStrict: true
+packageManagerStrictVersion: true
+strictPeerDependencies: true

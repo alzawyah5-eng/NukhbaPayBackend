@@ -1,0 +1,454 @@
+# Nukhbapay Staff Login System - Technical Blueprint
+
+Design version: 1.0
+Prepared: 10 November 2026
+Implementation home: the existing `nukhbapay` monorepo.
+Document status: implementation proposal, not a claim that the described code exists.
+
+## 1. Starting point and scope
+
+The user's latest development report says Brick 1, Brick 2A and Brick 2B are complete within their respective local scopes. Brick 2B supports synthetic, complete-snapshot imports and reads, with replay, conflict, concurrency, rollback and permissions tests. The report identifies migrations 001-003 and distinct migrator, read-only runtime and restricted importer roles. Preserve those results and permissions. These are reported results, not independently rerun in this document.
+
+ADR 0005 reportedly recommends Auth0-managed OpenID Connect, subject to approval, jurisdiction/data-location, procurement and operational checks. No actual issuer, API audience, registered client or configured identity environment has been supplied. The user has confirmed there is no existing staff login system.
+
+This document specifies proposed names and behavior for new work. Inspect the actual repository and ADRs before adding files or migrations; reuse equivalent existing implementations and resolve naming collisions. Do not rename existing packages or reset PostgreSQL.
+
+The first release covers invited, named staff using browsers. Customers, partner applications, kiosks, machine identities, supplier authentication and money movement are excluded.
+
+Proceed with local authorization foundations first. Real token validation requires the recorded provider decision and genuine non-production configuration. No fake issuer, homemade production tokens, default administrators or public registration bypasses.
+
+## 2. Architecture
+
+Auth0 is the proposed identity service. Nukhbapay remains the authority for staff status, business memberships, application permissions and approvals.
+
+```text
+Staff browser
+    | redirect for login
+    v
+Auth0 hosted login + mandatory strong authentication
+    | authorization response
+    v
+apps/admin-web server-side login component (later phase)
+    | stores tokens server-side; browser gets a session cookie
+    | forwards an access token intended for this API
+    v
+NestJS API
+    | signature / issuer / audience / expiry / client / assurance checks
+    v
+Resolve (issuer, subject) to an existing staff user
+    | check staff status, active membership and explicit permission
+    v
+Authorized application operation
+    | scoped repository operation and security audit
+    v
+PostgreSQL
+```
+
+The browser-facing component is a backend-for-frontend (BFF): server code in `apps/admin-web`, not another product or repository. Proposed UI technology is Next.js with the provider's supported SDK. API code stays in NestJS. Financial rules stay in the existing financial domain package. [R1, R2, R3]
+
+Use the standard Authorization Code flow with PKCE, state and nonce through a supported SDK. Validate exact allowed callback/logout destinations. Do not implement a password-grant endpoint or collect staff passwords in the Nukhbapay API. [R2, R3]
+
+Use a supported server-side session store, not a browser token vault. Disable browser access-token endpoints and unnecessary SDK proxy/management routes; do not expose tokens through an SDK default route. Implement atomic session updates so a concurrent rolling update cannot recreate a session that logout has deleted. Keep access and refresh tokens out of localStorage, URLs, browser-readable cookies and client response bodies. Encrypt any token-bearing server session payload using keys stored outside the database. Use Secure, HttpOnly, SameSite cookies and explicit CSRF protection for cookie-authorized state changes. [R3, R4]
+
+## 3. Authority: governance is not unrestricted technical access
+
+Replace the earlier everyday "Super Admin" proposal with bounded roles. Being senior in the organization must not automatically inherit every employee permission.
+
+```text
+Business owner / governance
+    | sets policy and approves exceptional authority
+    +------------------------+----------------------+
+    v                        v                      v
+Security administrators   Access administrators  Independent auditors
+Approve access /          Request access changes Read audit evidence
+suspend compromise        Manage approved flow  Cannot change grants
+    \                       /
+     +--- approved workflow ---+
+                 |
+                 v
+          Tenant administrator
+       Requests access within one business
+                 |
+                 v
+       Department-specific role grants
+     /         |          |          \
+ Catalogue   Pricing    Finance     Support
+                 |
+                 v
+       Each person gets only allowed actions
+```
+
+This is a delegation and approval chart, not automatic permission inheritance. A platform-level role does not imply access to every tenant's catalogue economics or customer records. Tenant access requires its own grant. There is no hidden platform-admin bypass.
+
+Application controls cannot make a compromised infrastructure root, identity-provider owner or database owner harmless. Keep those control-plane accounts separate from daily work, protect them strongly, and export security evidence to a separately controlled destination. [R5, R6]
+
+## 4. Exact proposed role-to-permission catalogue
+
+A tenant is a contractual/business security boundary. Reuse existing `tenants`. Branches and kiosks are not tenants by default. An Auth0 tenant is an identity-service environment and is not automatically a Nukhbapay business tenant.
+
+All recognized ACTIVE staff may use `staff.self.read` for their own identity and membership summary. This does not grant tenant data access. Unknown provider identities receive no automatically created membership.
+
+The lists below are the complete proposed role permissions; there are no wildcard permissions or unlisted inherited powers.
+
+| Role code | Scope | Exact permissions |
+|---|---|---|
+| GOVERNANCE_OWNER | Platform | `platform.audit.read`, `platform.access.approve_privileged` |
+| SECURITY_ADMIN | Platform | `platform.staff.read`, `platform.access.approve`, `platform.staff.suspend`, `platform.sessions.revoke`, `platform.audit.read` |
+| ACCESS_ADMIN | Platform | `platform.staff.read`, `platform.access.request` |
+| PLATFORM_AUDITOR | Platform | `platform.audit.read` |
+| TENANT_ADMIN | One tenant | `tenant.staff.read`, `tenant.access.request`, `tenant.staff.suspend`, `tenant.audit.read` |
+| CATALOG_OPERATOR | One tenant | `catalog.read`, `catalog.import.request`, `catalog.mapping.propose` |
+| CATALOG_REVIEWER | One tenant | `catalog.read`, `catalog.mapping.approve` |
+| PRICING_EDITOR | One tenant | `catalog.read`, `pricing.read`, `pricing.draft`, `pricing.submit` |
+| PRICING_APPROVER | One tenant | `catalog.read`, `pricing.read`, `pricing.approve` |
+| FINANCE_REVIEWER | One tenant | `pricing.read`, `finance.read`, `settlement.read` |
+| SUPPORT_AGENT | One tenant | `catalog.read`, `support.read_masked` |
+| TENANT_AUDITOR | One tenant | `tenant.audit.read` |
+
+Permission meanings:
+
+- `platform.*` operates only on the named identity/security metadata, not tenant commercial records.
+- `tenant.*` operates only inside an actively authorized tenant.
+- `catalog.read` excludes private provider costs, credentials and customer data.
+- `pricing.read` permits the authorized tenant's pricing economics, never provider credentials.
+- `finance.read` and `settlement.read` are reserved for later implemented financial reports; they do not authorize financial execution.
+- `support.read_masked` is reserved for minimal masked support records, not full identity documents or voucher secrets.
+- `catalog.import.request` requests a controlled import job later. It never exposes the importer database password or makes a browser a database importer.
+- `pricing.approve` approves a particular immutable proposal later; it is not an arbitrary publish or SQL-write permission.
+
+Activate capabilities only in the phase that implements them. Business permission definitions may be documented now but must not create business endpoints or functioning purchases in Brick 3. Do not add a general permission editor or per-user arbitrary direct grants in this release.
+
+Deny rules override combined role grants. Prohibit CATALOG_OPERATOR + CATALOG_REVIEWER and PRICING_EDITOR + PRICING_APPROVER for the same staff person in the same tenant. Regardless of role assignment, a person cannot approve their own proposal. Platform governance, access administration and security approval must not be combined into a normal self-approving account. Check the internal staff person ID, not merely different login accounts. [R5]
+
+## 5. Delegation and approvals
+
+Maintain a fixed, versioned delegation policy in code. Having a role is not permission to grant that role to someone else.
+
+| Change | Who may request? | Required approvals |
+|---|---|---|
+| Grant SUPPORT_AGENT or CATALOG_OPERATOR in an existing tenant | ACCESS_ADMIN or TENANT_ADMIN for their tenant | A different SECURITY_ADMIN |
+| Grant any other tenant role | ACCESS_ADMIN | SECURITY_ADMIN plus GOVERNANCE_OWNER, as different people |
+| Grant any platform role | ACCESS_ADMIN | SECURITY_ADMIN plus GOVERNANCE_OWNER, as different people |
+| Reactivate suspended access | Authorized access-change requester | Same approval level as the restored access, plus fresh authentication |
+| Suspend low-risk tenant staff | TENANT_ADMIN for its own tenant | Immediate, reason required; cannot affect itself or a privileged/reviewer/admin account |
+| Suspend an identified compromised staff user | SECURITY_ADMIN | Immediate, reason and alert required; no authority to reactivate alone |
+| Change role definitions | Reviewed source change | Security review and controlled release, not a web role editor |
+
+Approvers cannot be the requester or beneficiary of the change. One person cannot supply both approval slots through different accounts. A self-request may be submitted only through an allowed request workflow; it never grants access by itself.
+
+Each access request must bind the target staff identity (or pending invite), exact tenant/scope, operation, role set, version, reason and expiry. Editing any material field invalidates previous approvals. Recheck the request, target and all approvers' active permissions at application time. Lock the relevant records and apply the change once, in the same transaction as its audit event. [R7]
+
+Approved database changes and external provider-side user provisioning are not a distributed transaction. Use a durable identity-work item/outbox with stable operation IDs and retry/status tracking when the external integration is introduced. Do not activate access before required steps are complete. Account suspension takes effect locally first; an Auth0 outage must not keep Nukhbapay access active.
+
+Bootstrap is a separate one-time, explicitly authorized administrative runbook: verify named people and exact issuer/subject bindings, create initial limited grants with recorded evidence, require independent review, then disable normal reuse. Never make the first login or a matching email domain the owner. No default admin password. If enough independent staff are not available, test with isolated synthetic identities; do not claim production separation of duties exists.
+
+## 6. Staff login, sessions and recovery policy
+
+These are proposed project defaults, not vendor guarantees or a declaration of regulatory compliance.
+
+| Control | Proposed value / rule |
+|---|---|
+| Enrollment | Invitation only; no public staff signup or automatic tenant membership |
+| Authentication | Mandatory MFA; FIDO2/WebAuthn security keys required for privileged staff |
+| Other staff | Prefer phishing-resistant authentication; any temporary lower-assurance exception is documented, time-bounded and read-only |
+| Privileged recovery | No silent SMS/email-only downgrade; verified recovery with independent review and security notification |
+| Spare authenticator | Privileged staff enroll a separately stored spare key |
+| API access token | Target 5-minute lifetime; actual provider configuration must be verified |
+| Staff browser session | 15-minute inactivity timeout, 8-hour absolute maximum |
+| Sensitive change | Fresh, verified authentication evidence no older than 5 minutes |
+| Invitation | Single-use, 24-hour expiry |
+| Access-change approval | 30-minute expiry before application |
+| Local suspension | New protected requests denied after committed suspension; no permission cache initially |
+| In-flight privileged writes | Recheck and serialize authorization with the protected change; a completed operation cannot be retroactively undone by logout |
+| Permission store unavailable | Protected access fails closed; return a controlled service-unavailable response, not an allow |
+| Emergency access | Separate time-bounded runbook, alerts and independent review; no everyday wildcard role |
+
+Auth0 supports WebAuthn security-key MFA. NIST distinguishes phishing-resistant cryptographic authentication from manually entered OTPs, which are not phishing-resistant. Verify actual factor availability, enrollment, recovery, provider plan and enforcement before enabling privileged access. [R8, R9]
+
+Use hosted password handling and supported provider recovery. Do not implement local password hashes, OTP validation or security questions. A password reset must not silently disable MFA. MFA-factor replacement is a sensitive event, not ordinary support work. [R10]
+
+Do not assume `amr`, `acr`, or authentication-time information appears in every access token. Verify the selected provider token profile and obtain provider-signed or securely server-maintained assurance evidence. Token issue time is not necessarily fresh user authentication. Missing evidence denies sensitive operations.
+
+Local browser logout, provider logout, refresh-token revocation and suspension are separate operations. Destroy the local session and revoke supported credentials, but do not claim that logout alone invalidates every already-issued access token. Staff status and grant checks provide independent local denial; short token lifetimes limit remaining bearer-token exposure. [R1, R4]
+
+## 7. API token and authorization pipeline
+
+Use a maintained token-verification library compatible with the actual NestJS HTTP adapter. Pin versions after reviewing current official documentation. Do not implement JWT cryptography yourself. [R1, R11]
+
+Validation requirements:
+
+1. Accept the intended bearer access-token format only; reject malformed/oversized inputs.
+2. Verify the signature against the configured issuer's trusted key source. Never follow token-supplied `jku`/`x5u` destinations or create a discovery URL from an untrusted issuer.
+3. Require an exact trusted issuer and audience for the Nukhbapay API; allow only the configured algorithm, initially RS256 if the approved provider configuration uses it.
+4. Enforce expiry, not-before where present, valid issued-at semantics, required subject and a documented bounded clock tolerance.
+5. Restrict calling clients and human interactive flows using the provider's verified token profile. Do not accept client-credentials/service identities into staff routes.
+6. Reject ID tokens and Auth0 Management API tokens. Different audiences and token-profile rules must enforce this.
+7. Resolve the exact `(issuer, subject)` to a pre-enrolled ACTIVE staff user. Never auto-link identities by email or silently rewrite issuer strings.
+8. Verify active membership and explicit permission for the selected tenant and object.
+9. Apply deny rules, fresh-authentication requirements and required approvals.
+10. Run the operation using a tenant-scoped repository; log the result without token or secret content.
+
+Roles in token claims or a frontend menu never replace current database membership checks. A tenant path/header is an untrusted requested scope; it can select among permitted memberships only after validation. [R5]
+
+Use global authentication protection with a small explicit public-route list. Missing permission metadata on a protected operation must deny rather than allow. Route-level checks do not replace application-use-case checks.
+
+| Outcome | HTTP behavior |
+|---|---|
+| Missing/invalid/expired credentials | 401 |
+| Valid identity, insufficient local access | 403 |
+| Object outside authorized scope | Consistent 404 where appropriate, without confirming another tenant's object exists |
+| Dependency needed for authorization unavailable | 503; do not permit access |
+| Rate limit exceeded | 429 under the documented rate policy |
+
+## 8. Exact proposed database tables
+
+Existing `tenants` is reused. These names are new design targets, not inspected current tables. Use the next unused migrations after the existing 001-003 history; never rewrite applied migrations.
+
+UUID means an internal UUID identifier. Use `timestamptz` for timestamps, non-null fields unless explicitly optional, foreign keys, explicit status checks and restrictive deletion rules. Preserve history rather than cascading deletion of security evidence.
+
+### 8.1 Core tables: Brick 3A
+
+| Table | Proposed columns / constraints |
+|---|---|
+| `staff_users` | `id` PK; `display_name`; `contact_email`; `status` = PENDING/ACTIVE/SUSPENDED/DISABLED; `authz_version` bigint >= 0; optional `tokens_valid_after`; `created_at`; `updated_at`. Contact email is not the security key. |
+| `staff_identities` | `id` PK; `staff_id` FK; exact `issuer`; exact `subject`; `status` = ACTIVE/DISABLED; `created_at`; UNIQUE(issuer, subject). Linking additional identities is an approved workflow. |
+| `staff_memberships` | `id` PK; `staff_id` FK; `tenant_id` FK; `status` = ACTIVE/SUSPENDED/REVOKED; `version`; timestamps; UNIQUE(staff_id, tenant_id); UNIQUE(id, tenant_id). |
+| `iam_roles` | `code` PK; `scope` = PLATFORM/TENANT; `description`; `privileged`; UNIQUE(code, scope). Definitions are migration-controlled. |
+| `iam_permissions` | `code` PK; `scope` = SELF/PLATFORM/TENANT; `description`; `activation_phase`; UNIQUE(code, scope). No unsupported endpoint is enabled by a permission row. |
+| `iam_role_permissions` | `role_code`; `permission_code`; `scope`; composite PK; composite FKs enforce matching role/permission scope. The SELF permission is handled explicitly for the current staff user, not through cross-scope inheritance. |
+| `platform_role_grants` | `id` PK; `staff_id` FK; `role_code`; fixed PLATFORM scope; `granted_at`; optional `expires_at` and `revoked_at`; `grant_source`; `evidence_reference`. Composite FK restricts platform roles. At most one unrevoked grant per staff/role; revoke historical expired rows before regranting. |
+| `tenant_role_grants` | `id` PK; `membership_id`; `tenant_id`; `role_code`; fixed TENANT scope; same grant lifecycle/evidence fields. Composite membership FK prevents wrong-tenant relationships; composite role FK prevents platform-role assignment. At most one unrevoked grant per membership/role. |
+| `security_audit_events` | `id` PK; `occurred_at`; optional verified `actor_staff_id`; optional `tenant_id`; bounded `action`; `outcome`; `target_type`; `target_id`; `request_id`; bounded reason; allowlisted sanitized metadata. Append-only for application roles; no UPDATE/DELETE. |
+
+For grants: CHECK timestamp ordering; do not place `now()` freshness rules in CHECK constraints. Evaluate expiry at authorization time. `grant_source` identifies BOOTSTRAP or approved workflow evidence; TEST is allowed only in isolated test fixtures. Bootstrap records cannot be submitted through normal runtime APIs.
+
+### 8.2 Additional tables: later Brick 3 substeps
+
+| Table | Phase | Proposed content |
+|---|---|---|
+| `staff_sessions` | 3C | SDK-backed server session ID/hash, staff FK, encrypted session payload, created/last-active/idle-expiry/absolute-expiry/revoked timestamps. Encryption key is external to PostgreSQL. |
+| `access_change_requests` | 3D | Scope and optional tenant, requester, target staff/pending invitation, operation, canonical requested changes, content hash, version, reason, status, expiry, applied time. |
+| `access_change_approvals` | 3D | Request FK, decision, approver staff FK, required approval slot, approved request version/hash, verified authentication time, created time; unique approver per request. |
+| `staff_invitations` | 3D | Approved request FK, intended email, optional bound identity, single-use token hash where applicable, expiry, accepted/revoked state. Do not store raw invitation tickets in logs. |
+| `identity_outbox` | 3D | Stable operation ID, approved request reference, external action type, delivery/status/retry metadata. No provider secrets or raw login tokens in payloads. |
+
+When adding requests in 3D, add proper foreign keys from workflow-origin grants to the accepted request. Do not treat a free-form evidence string as approval proof in the runtime workflow.
+
+Use a separate restricted identity reader for lookup and a separate narrowly privileged identity writer when management workflows exist. Exact proposed role names: `nukhabapay_identity_reader`, `nukhabapay_identity_writer`. They must not own tables, have BYPASSRLS, perform DDL, inherit migration credentials or alter the permission catalogue. Grant only needed operations; use controlled write paths, not unrestricted browser-driven DML.
+
+Do not change existing catalogue importer privileges. An application staff role and a PostgreSQL connection role are different concepts.
+
+Tenant isolation has three layers: tenant-consistent foreign keys, scoped application/repository authorization, and tested row-level security where selected. RLS is a planned additional boundary on tenant-owned IAM data before exposure, not an already-existing guarantee. Document actual policies and test the non-owner runtime roles, absent context and pooled-connection reuse. Set request context transaction-locally on the same connection after identity validation. Owners and BYPASSRLS roles can bypass normal policies. RLS does not protect against a fully compromised trusted application that can choose its own context. [R6]
+
+### Relationships
+
+```text
+staff_users --< staff_identities
+     |
+     +--< platform_role_grants >-- iam_roles
+     |
+     +--< staff_memberships >-- existing tenants
+                    |
+                    +--< tenant_role_grants >-- iam_roles
+                                                   |
+                                                   +--< iam_role_permissions >-- iam_permissions
+
+access_change_requests --< access_change_approvals
+          |
+          +--> controlled application --> grants + audit event
+```
+
+## 9. Exact proposed module structure
+
+Keep existing directories; add only the files required by the current substep.
+
+```text
+nukhbapay/
+  apps/api/src/modules/identity/
+    identity.module.ts
+    identity.config.ts
+    access-token.verifier.ts
+    authentication.guard.ts
+    authorization.guard.ts
+    public-route.decorator.ts
+    require-permission.decorator.ts
+    current-staff.decorator.ts
+    staff-context.controller.ts
+  apps/admin-web/                         # build in 3C, not 3A
+    src/app/(protected)/layout.tsx
+    src/app/(protected)/page.tsx
+    src/app/(protected)/staff/page.tsx    # later management screen
+    src/lib/auth-client.ts
+    src/lib/api-client.server.ts
+    src/lib/session-store.server.ts
+  packages/application/src/identity/
+    principal.ts
+    permission-catalog.ts
+    role-catalog.ts
+    authorization-policy.ts
+    resolve-staff-principal.ts
+    resolve-tenant-access.ts
+    identity-repository.port.ts
+    security-audit.port.ts
+    request-access-change.ts             # 3D
+    approve-access-change.ts             # 3D
+    suspend-staff.ts                     # 3D
+  packages/database/
+    migrations/<next>_staff_identity_foundation.ts
+    src/repositories/identity-repository.ts
+    src/repositories/security-audit-repository.ts
+    test/identity.integration.spec.ts
+    test/identity-permissions.spec.ts
+  packages/contracts/admin/
+    staff-context.schema.json
+    access-change.schema.json            # 3D
+  tests/security/
+    identity-token-validation.spec.ts
+    tenant-authorization.spec.ts
+    staff-session.spec.ts                # 3C
+    access-approval.spec.ts               # 3D
+  docs/security/
+    staff-access-model.md
+    staff-login-threat-model.md
+    staff-account-recovery.md
+  docs/adr/
+    <next>-staff-authorization-and-browser-sessions.md
+```
+
+Names are proposed. Preserve current framework conventions and test placement where equivalent files already exist. Do not create every later-phase file as an empty stub. The SDK determines its supported routing integration; verify its pinned version rather than copying an old Next.js tutorial.
+
+Transport guards verify and route. Shared application operations decide authorization. Repositories persist and enforce constraints. Admin-web must not query authorization tables directly as an unrestricted database client. Browser-only code must not import server tokens, database credentials or provider adapters.
+
+## 10. Exact proposed endpoint contract
+
+These are new application design endpoints, not routes that already exist. Only the existing `GET /health/live` is reported implemented. Do not implement supplier endpoints in this module.
+
+| Phase | Endpoint | Behavior / required permission |
+|---|---|---|
+| Existing | `GET /health/live` | Minimal public process liveness; no business or credential information |
+| 3B | `GET /v1/staff/me` | Verified pre-enrolled ACTIVE staff; `staff.self.read`; return own identity/memberships only |
+| 3B | `GET /v1/staff/tenants/:tenantId/access` | Own active membership and effective tenant permissions; no commercial data |
+| 3C | `GET /auth/login` | BFF starts supported hosted login with fixed redirect rules |
+| 3C | `GET /auth/callback` | SDK validates authorization response, state, nonce and code exchange; create server session |
+| 3C | `POST /auth/logout` | CSRF-protected local session termination plus documented provider logout/revocation behavior |
+| 3D | `GET /v1/tenants/:tenantId/staff` | `tenant.staff.read`; tenant-scoped minimal staff directory |
+| 3D | `POST /v1/tenants/:tenantId/access-requests` | `tenant.access.request`; allowed low-risk changes only |
+| 3D | `POST /v1/platform/access-requests` | `platform.access.request`; submit a controlled access/invitation/reactivation request |
+| 3D | `POST /v1/platform/access-requests/:id/approvals` | Appropriate approval permission, distinct eligible approver, fresh authentication and exact request version |
+| 3D | `POST /v1/platform/staff/:id/suspend` | `platform.staff.suspend`; immediate local denial with reason and audit |
+| 3D | `POST /v1/tenants/:tenantId/staff/:id/suspend` | `tenant.staff.suspend`; low-risk permitted targets only |
+| 3D | `POST /v1/platform/staff/:id/revoke-sessions` | `platform.sessions.revoke`; local cutoff/session invalidation and tracked provider follow-up |
+| 3D | `GET /v1/platform/audit-events` | `platform.audit.read`; sanitized security evidence only |
+| 3D | `GET /v1/tenants/:tenantId/audit-events` | `tenant.audit.read`; only that tenant's authorized evidence |
+
+The login route names are proposed application contracts; map them to the selected SDK's supported routes. A POST logout wrapper may be needed. Do not create a second custom OAuth implementation to force those paths.
+
+Invitation issuance and redemption require a separate verified contract in 3D: an approved request creates a single-use provider-supported invitation; acceptance binds the verified authenticated identity to the intended invite and existing staff record. Do not add an unauthenticated "set role" or unrestricted "activate account" endpoint.
+
+## 11. Audit, observability and recovery
+
+Record login outcomes, invitation/activation, grant requests, approvals, denials, suspension, reactivation, session revocation, MFA recovery, administrative overrides and bootstrap. A protected state change and its authoritative audit record commit together.
+
+Include actor, target, tenant/scope, action, result, reason, correlation ID, time and approved request version. Never store passwords, bearer tokens, cookie values, MFA secrets, recovery codes, API keys, voucher PINs or whole authentication headers in audit records. Failed authentication has no verified actor; do not label an unverified claimed subject as trusted.
+
+Use append-only application privileges and a separately protected log export before production. A normal admin must not erase evidence. Preserve recovery information and test restorations. Rate-limit and bound logs so attacker-generated failures cannot fill storage unchecked.
+
+The first release must test suspension even while the identity provider is unavailable. Reactivation needs independently approved recovery; it is not the reverse of an emergency one-click suspension.
+
+Provider accounts remain separate: the supplied Qore3 SDK describes assigned TerminalId/password credentials for terminals (pages 7-8). They are not staff login credentials and must never be exposed through staff profile APIs.
+
+## 12. Implementation phases and acceptance
+
+This blueprint refines Brick 3 into bounded substeps. Do not skip or rename Brick 2B, and do not start Brick 4 within this work.
+
+| Substep | Deliverable | Completion evidence |
+|---|---|---|
+| 3A | Provider-independent staff/membership schema, fixed permission policy, read repositories and audit foundation | Real PostgreSQL migrations, constraint/role/isolation tests; pure permission tests; existing regressions pass |
+| 3B | Real issuer-backed token validation and staff-context endpoints | Approved actual non-production issuer/audience/client; real provider token acceptance; negative signature/issuer/audience/expiry/profile tests; local membership denial |
+| 3C | Minimal browser staff console with hosted login and server-side sessions | Real browser login/MFA/logout, CSRF, cookie, timeout, no-token-leakage and suspension tests |
+| 3D | Invitations, staff access changes, independent approvals and suspension/recovery | Approval replay/race/change tests; lifecycle and external-operation recovery tests; no self-escalation |
+| 3E | Security review and operational handover | Key rotation, identity outage, restore/revocation/recovery drills; verified independent evidence; no unresolved critical controls |
+| Brick 4 | Controlled publications and authorized catalogue API | Separate future scope |
+
+3A can be implemented without Auth0 credentials. It is local authorization foundation work, not proof of authentication. Keep its application operations internal and test them with explicitly marked synthetic identities. Test identity inputs must not become a deployed HTTP login bypass.
+
+3B is blocked only where actual provider configuration/approval is missing. Complete safe independent work and report missing facts; never mark live identity integration complete using local signing fixtures alone.
+
+### Required tests by boundary
+
+| Boundary | Must prove |
+|---|---|
+| Identity | Wrong signature/issuer/audience, expired and malformed tokens, ID tokens and machine tokens are rejected |
+| Issuer key source | Only configured destinations; controlled key rotation/cache behavior; unknown keys fail closed |
+| Membership | Unknown, suspended, revoked or cross-tenant membership denies access |
+| Permissions | No role inheritance, wildcard, missing-metadata allow or token-claim-only escalation |
+| Accounts | Separate identities for the same person cannot bypass self-approval rules |
+| Database | Exact constraints, non-owner grants, scoped reads, rollback, and no pooled-context leakage |
+| Revocation | Committed suspension/role removal blocks new protected requests despite an unexpired token |
+| Browser | CSRF, redirects, cookies, session fixation/expiry and token leakage are tested |
+| Approvals | Request edit invalidates approval; replay does not reapply; requester/beneficiary cannot approve; lost approver rights block execution |
+| Recovery | Factor reset cannot bypass strong authentication and permissions; outage does not reactivate suspended users |
+| Regression | Existing API, database, application, pricing, synthetic import, Python and structure checks still pass |
+
+## 13. Configuration plan
+
+Existing DB_MIGRATION_URL, DB_RUNTIME_URL and DB_RUNTIME_ROLE remain existing configuration names from the project reports. Preserve actual importer configuration discovered in the repository; do not invent its current name.
+
+New proposed names, introduced only when their substep needs them:
+
+```text
+IDENTITY_ISSUER_URL
+IDENTITY_API_AUDIENCE
+IDENTITY_ALLOWED_CLIENT_IDS
+IDENTITY_DB_READ_URL
+IDENTITY_DB_WRITE_URL
+STAFF_WEB_BASE_URL
+STAFF_OIDC_CLIENT_ID
+STAFF_OIDC_CLIENT_SECRET
+STAFF_SESSION_SECRET
+STAFF_SESSION_ENCRYPTION_KEY_REFERENCE
+```
+
+These are application configuration proposals, not automatically the environment names used by the selected SDK. Add an explicit mapping or use the SDK's documented names consistently. Do not create two conflicting configuration sources. No values are supplied here.
+
+The verifier obtains trusted discovery/JWKS configuration from the approved issuer, not request data. Fail startup for missing required active-module configuration. Never supply fallback secrets. Keep development/test/production identity services and credentials separate.
+
+## 14. Release limitations
+
+No zero-breach guarantee is possible. This design makes security controls explicit and testable; it does not certify the platform or replace independent assessment.
+
+No payment/transfer/refund execution permission is created in Brick 3. Future financial workflows need their own authorization, ledger, idempotency, settlement, recovery and compliance acceptance.
+
+Do not automatically provision a paid service or upload live staff/customer information while provider region, procurement and data-handling conditions remain unresolved. Record actual owner decisions; do not invent an approval date or configured provider account.
+
+## 15. Reference sources
+
+This design combines project-specific proposals with current primary technical guidance reviewed on 10 November 2026. Numeric timeouts and role choices are project proposals, not quoted vendor requirements.
+
+[R1] Auth0 - Validate Access Tokens / Validate JSON Web Tokens
+[R2] IETF RFC 9700 - Best Current Practice for OAuth 2.0 Security
+[R3] Auth0 official Next.js SDK examples - server-side sessions
+[R4] OWASP - Session Management Cheat Sheet
+[R5] OWASP - Authorization Cheat Sheet
+[R6] PostgreSQL 17 - Row Security Policies
+[R7] OWASP - Transaction Authorization Cheat Sheet
+[R8] Auth0 - WebAuthn with FIDO Security Keys
+[R9] NIST SP 800-63B-4 - Authentication and Authenticator Management
+[R10] OWASP - Multifactor Authentication Cheat Sheet
+[R11] NestJS - Authentication / Authorization documentation (use guards, not the tutorial's homemade token issuer)
+
+```text
+R1 https://auth0.com/docs/secure/tokens/access-tokens/validate-access-tokens
+   https://auth0.com/docs/secure/tokens/json-web-tokens/validate-json-web-tokens
+R2 https://www.rfc-editor.org/rfc/rfc9700.html
+R3 https://github.com/auth0/nextjs-auth0/blob/main/EXAMPLES.md
+R4 https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html
+R5 https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html
+R6 https://www.postgresql.org/docs/17/ddl-rowsecurity.html
+R7 https://cheatsheetseries.owasp.org/cheatsheets/Transaction_Authorization_Cheat_Sheet.html
+R8 https://developer.auth0.com/resources/labs/authentication/webauthn-with-fido-security-keys
+R9 https://pages.nist.gov/800-63-4/sp800-63b.html
+R10 https://cheatsheetseries.owasp.org/cheatsheets/Multifactor_Authentication_Cheat_Sheet.html
+R11 https://docs.nestjs.com/security/authentication
+    https://docs.nestjs.com/security/authorization
+```

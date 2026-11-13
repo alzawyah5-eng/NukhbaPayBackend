@@ -1,0 +1,36 @@
+name: nukhabapay-local
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: nukhabapay_dev
+      POSTGRES_USER: nukhabapay_dev
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a local database password}
+      NUKHABAPAY_DB_MIGRATION_PASSWORD: ${NUKHBAPAY_DB_MIGRATION_PASSWORD:?Set a separate local migration-role password}
+      NUKHABAPAY_DB_RUNTIME_PASSWORD: ${NUKHBAPAY_DB_RUNTIME_PASSWORD:?Set a separate local runtime-role password}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nukhabapay_dev -d nukhabapay_dev"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  redis:
+    image: redis:8
+    profiles: ["cache"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set a local cache password}
+    command:
+      - sh
+      - -c
+      - exec redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+volumes:
+  postgres_data:
+  redis_data:

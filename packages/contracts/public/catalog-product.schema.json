@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.nukhbapay.example/public/catalog-product.v1.schema.json",
+  "title": "CatalogProductV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "product_id",
+    "name",
+    "category",
+    "price_status",
+    "catalog_version"
+  ],
+  "properties": {
+    "product_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "category": {
+      "type": "string",
+      "minLength": 1
+    },
+    "price_status": {
+      "enum": [
+        "INDICATIVE",
+        "AVAILABLE",
+        "UNAVAILABLE"
+      ]
+    },
+    "catalog_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "display_total": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$"
+    },
+    "currency": {
+      "type": "string",
+      "pattern": "^[A-Z]{3}$"
+    }
+  },
+  "description": "Personalized or volatile services obtain a final price through POST /v1/quotes. Pricing identity includes authenticated channel and policy context."
+}
+

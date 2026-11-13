@@ -1,0 +1,12 @@
+{
+  "name": "@nukhbapay/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Public, privileged admin and internal contract definitions.",
+  "exports": {
+    "./public/quote.schema.json": "./public/quote.schema.json",
+    "./public/catalog-product.schema.json": "./public/catalog-product.schema.json"
+  }
+}
+

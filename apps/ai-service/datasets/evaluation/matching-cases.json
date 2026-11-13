@@ -1,0 +1,27 @@
+{
+  "description": "Synthetic advisory-guard cases; not real provider products or model evaluations.",
+  "base_product": {
+    "record_id": "synthetic_brand_x_ae_100",
+    "category": "gift_card",
+    "country": "AE",
+    "currency": "AED",
+    "issuer_id": "synthetic_brand_x",
+    "denomination_minor": "10000",
+    "redemption_region": "AE",
+    "validity": "P365D",
+    "fulfillment_method": "DIGITAL_CODE",
+    "restriction_codes": ["ONLINE_REDEMPTION"]
+  },
+  "cases": [
+    {"name": "identical_benefit", "provider_overrides": {}, "expected": "CANDIDATE"},
+    {"name": "different_currency_same_number", "provider_overrides": {"currency": "USD"}, "expected": "REJECTED"},
+    {"name": "different_redemption_region", "provider_overrides": {"redemption_region": "US"}, "expected": "REJECTED"},
+    {"name": "different_face_value", "provider_overrides": {"denomination_minor": "1000"}, "expected": "REJECTED"},
+    {"name": "different_brand", "provider_overrides": {"issuer_id": "synthetic_brand_y"}, "expected": "REJECTED"},
+    {"name": "shorter_validity", "provider_overrides": {"validity": "P30D"}, "expected": "REJECTED"},
+    {"name": "different_fulfillment", "provider_overrides": {"fulfillment_method": "PIN"}, "expected": "REJECTED"},
+    {"name": "missing_region", "provider_overrides": {"redemption_region": null}, "expected": "REQUIRES_REVIEW"},
+    {"name": "missing_restrictions", "provider_overrides": {"restriction_codes": null}, "expected": "REQUIRES_REVIEW"},
+    {"name": "different_restrictions", "provider_overrides": {"restriction_codes": ["NEW_CUSTOMERS_ONLY"]}, "expected": "REJECTED"}
+  ]
+}

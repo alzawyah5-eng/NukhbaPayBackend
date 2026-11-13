@@ -1,0 +1,37 @@
+{
+  "name": "@nukhbapay/database",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local PostgreSQL catalog schema and restricted runtime access.",
+  "exports": {
+    ".": {
+      "types": "./dist/database/src/index.d.ts",
+      "import": "./dist/database/src/index.js"
+    },
+    "./identity-runtime": {
+      "types": "./dist/database/src/identity-runtime.d.ts",
+      "import": "./dist/database/src/identity-runtime.js"
+    }
+  },
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "tsc -p tsconfig.json && tsc -p tsconfig.test.json && node --test dist-test/database/test/*.spec.js",
+    "test:integration": "tsc -p tsconfig.json && tsc -p tsconfig.test.json && node --test dist-test/database/test/*.spec.js",
+    "migrate": "node ../../scripts/rehearse-reviewed-migrations.mjs --registered-only"
+  },
+  "dependencies": {
+    "@nukhbapay/application": "workspace:*",
+    "node-pg-migrate": "9.0.0",
+    "pg": "8.23.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "@types/pg": "8.23.1",
+    "typescript": "6.0.2"
+  }
+}

@@ -1,0 +1,149 @@
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import test from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { generateDraftPublicationCandidate, type DraftPublicationRequest } from "@nukhbapay/application";
+import { createCataloguePublicationDraftStore, PublicationDraftConflictError, PublicationDraftStaleError } from "@nukhbapay/database";
+import { Client } from "pg";
+import { forDatabase, withDisposableIamDatabase } from "./fixtures/disposable-iam-database.js";
+
+const root=fileURLToPath(new URL("../../../../",import.meta.url));
+const databaseRoot=path.join(root,"packages","database");
+const proposedSql=readFileSync(path.join(databaseRoot,"pending-migrations","007_catalogue_publication_drafts.sql"),"utf8");
+const grantSql=readFileSync(path.join(databaseRoot,"roles","grant_catalogue_publication_draft_writer.sql"),"utf8");
+const {rehearseReviewedMigrations}=await import(pathToFileURL(path.join(root,"scripts","rehearse-reviewed-migrations.mjs")).href);
+
+const expectedHistory=["001_catalog","002_import_role_privileges","003_import_role_read_access","004_staff_identity_foundation","005_staff_workflow_persistence","006_staff_server_sessions"];
+const policy=Object.freeze({version:"publication-policy-v1",serviceFeeMinor:200n,maximumServiceFeeMinor:200n,taxAmountMinor:0n,
+  paymentFeeBasisPoints:150,paymentFixedFeeMinor:20n,agentCommissionMinor:50n,minimumContributionMinor:100n,maximumOfferAgeMs:86_400_000});
+const product=Object.freeze({canonicalProductId:"synthetic_brand_x_ae_aed_100",brand:"SYNTHETIC_BRAND_X",redemptionCountry:"AE" as const,
+  currency:"AED" as const,faceValueMinor:10_000n,fulfillmentMethod:"DIGITAL_PIN" as const,termsVersion:"synthetic-terms-v1"});
+
+function identifier(value:string):string {assert.match(value,/^[A-Za-z_][A-Za-z0-9_]{0,62}$/);return `"${value}"`;}
+async function ownerFor(databaseName:string):Promise<Client>{const client=new Client({connectionString:forDatabase(process.env["DB_MIGRATION_URL"]!,databaseName)});await client.connect();return client;}
+
+test("proposed 007 provides atomic, immutable, tenant-scoped draft publication evidence",async t=>{
+  await withDisposableIamDatabase(async fixture=>{
+    await fixture.fixtureClient.query("CREATE SCHEMA nukhabapay AUTHORIZATION nukhabapay_migrator");
+    await fixture.fixtureClient.query("GRANT USAGE ON SCHEMA nukhabapay TO nukhabapay_runtime,nukhabapay_importer,nukhabapay_identity_reader,nukhabapay_identity_writer");
+    assert.deepEqual(await rehearseReviewedMigrations(forDatabase(process.env["DB_MIGRATION_URL"]!,fixture.databaseName)),expectedHistory);
+    const owner=await ownerFor(fixture.databaseName);
+    const writerRole=`nukh_publication_${randomUUID().replaceAll("-","").slice(0,20)}`;
+    const hostileRole=`nukh_hostile_${randomUUID().replaceAll("-","").slice(0,20)}`;
+    let writer:Client|undefined,store:Awaited<ReturnType<typeof createCataloguePublicationDraftStore>>|undefined;
+    try {
+      await t.test("migration gates reject missing authorization, hostile schema ACL and unexpected defaults",async()=>{
+        await owner.query("BEGIN");
+        try {await assert.rejects(()=>owner.query(proposedSql),{code:"42501"});} finally {await owner.query("ROLLBACK");}
+        assert.equal((await owner.query("SELECT to_regclass('nukhabapay.catalogue_publication_candidates') IS NULL AS absent")).rows[0].absent,true);
+        await fixture.fixtureClient.query(`CREATE ROLE ${identifier(hostileRole)} NOLOGIN`);
+        await owner.query(`GRANT CREATE ON SCHEMA nukhabapay TO ${identifier(hostileRole)}`);
+        await owner.query("BEGIN");
+        try {await owner.query("SELECT set_config('nukhbapay.publication_migration','BRICK_4A_SYNTHETIC',true)");await assert.rejects(()=>owner.query(proposedSql),{code:"42501"});}
+        finally {await owner.query("ROLLBACK");await owner.query(`REVOKE ALL ON SCHEMA nukhabapay FROM ${identifier(hostileRole)}`);}
+        await owner.query(`ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO ${identifier(hostileRole)}`);
+        await owner.query("BEGIN");
+        try {await owner.query("SELECT set_config('nukhbapay.publication_migration','BRICK_4A_SYNTHETIC',true)");await assert.rejects(()=>owner.query(proposedSql),{code:"42501"});}
+        finally {await owner.query("ROLLBACK");await owner.query(`ALTER DEFAULT PRIVILEGES REVOKE ALL ON TABLES FROM ${identifier(hostileRole)}`);}
+        await fixture.fixtureClient.query(`DROP ROLE ${identifier(hostileRole)}`);
+      });
+
+      await owner.query("BEGIN");
+      try {await owner.query("SELECT set_config('nukhbapay.publication_migration','BRICK_4A_SYNTHETIC',true)");await owner.query(proposedSql);await owner.query("COMMIT");}
+      catch(error){await owner.query("ROLLBACK");throw error;}
+      assert.deepEqual((await owner.query("SELECT name FROM nukhabapay.schema_migrations ORDER BY id")).rows.map(row=>row.name),expectedHistory);
+
+      const tenantId=randomUUID(),otherTenantId=randomUUID(),productId=randomUUID(),accountId=randomUUID(),snapshotId=randomUUID(),mappingId=randomUUID(),offerRowId=randomUUID();
+      await owner.query("INSERT INTO nukhabapay.tenants(id,tenant_key) VALUES($1,'publication-tenant'),($2,'other-publication-tenant')",[tenantId,otherTenantId]);
+      await owner.query(`INSERT INTO nukhabapay.products(id,canonical_product_key,brand,redemption_country,currency,face_value_minor,fulfillment_method,terms_version)
+        VALUES($1,$2,$3,'AE','AED',10000,'DIGITAL_PIN',$4)`,[productId,product.canonicalProductId,product.brand,product.termsVersion]);
+      await owner.query(`INSERT INTO nukhabapay.provider_accounts(id,tenant_id,provider_code,external_account_key,status) VALUES($1,$2,'SYNTH_PROVIDER_A','synthetic-account','ACTIVE')`,[accountId,tenantId]);
+      await owner.query(`INSERT INTO nukhabapay.provider_snapshots(id,tenant_id,provider_account_id,snapshot_key,source_version,observed_at,status,row_count,completed_at)
+        VALUES($1,$2,$3,'publication-snapshot-1','synthetic-v1','2026-11-09T09:00:00Z','COMPLETE',1,'2026-11-09T09:05:00Z')`,[snapshotId,tenantId,accountId]);
+      await owner.query(`INSERT INTO nukhabapay.product_mappings(id,tenant_id,provider_account_id,provider_sku,product_id,mapping_version,status,provenance_kind,provenance,source_snapshot_id)
+        VALUES($1,$2,$3,'SYNTH-100',$4,1,'APPROVED','IMPORT','{"source":"synthetic"}'::jsonb,$5)`,[mappingId,tenantId,accountId,productId,snapshotId]);
+      await owner.query(`INSERT INTO nukhabapay.provider_offers(id,tenant_id,provider_account_id,provider_snapshot_id,product_mapping_id,product_mapping_version,product_id,
+        face_value_minor,provider_offer_key,provider_debit_minor,additional_provider_fee_minor,upfront_discount_minor,available,observed_at,valid_until)
+        VALUES($1,$2,$3,$4,$5,1,$6,10000,'offer-100',9600,50,400,true,'2026-11-09T09:00:00Z','2026-11-09T11:00:00Z')`,
+        [offerRowId,tenantId,accountId,snapshotId,mappingId,productId]);
+
+      await fixture.fixtureClient.query(`CREATE ROLE ${identifier(writerRole)} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS`);
+      await owner.query("BEGIN");
+      try {await owner.query("SELECT set_config('nukhabapay.publication_writer_role',$1,true)",[writerRole]);await owner.query(grantSql);await owner.query("COMMIT");}
+      catch(error){await owner.query("ROLLBACK");throw error;}
+      const writerUrl=new URL(forDatabase(process.env["DB_TEST_ADMIN_URL"]!,fixture.databaseName));writerUrl.username=writerRole;writerUrl.password=randomUUID();
+      store=await createCataloguePublicationDraftStore({connectionString:writerUrl.href,expectedRole:writerRole,expectedDatabase:fixture.databaseName,poolMax:2});
+      writer=new Client({connectionString:writerUrl.href});await writer.connect();
+
+      const request:DraftPublicationRequest={tenantId,productId,product,sourceSnapshots:[{snapshotId,providerAccountId:accountId,snapshotKey:"publication-snapshot-1",
+        sourceVersion:"synthetic-v1",observedAt:"2026-11-09T09:00:00Z",completedAt:"2026-11-09T09:05:00Z",status:"COMPLETE"}],
+        offers:[{providerId:"SYNTH_PROVIDER_A",offerId:"offer-100",snapshotId,identity:product,mappingStatus:"APPROVED",providerDebitMinor:9600n,
+          upfrontDiscountMinor:400n,additionalProviderFeeMinor:50n,available:true,eligible:true,observedAt:"2026-11-09T09:00:00Z",validUntil:"2026-11-09T11:00:00Z"}],
+        pricingPolicy:policy,evaluatedAt:"2026-11-09T10:00:00Z",expectedPreviousVersion:0,idempotencyKey:randomUUID()};
+      const candidate=generateDraftPublicationCandidate(request);
+
+      await t.test("restricted role has exact draft-only rights and forced RLS",async()=>{
+        const forced=await owner.query("SELECT count(*)::int AS n,bool_and(relrowsecurity AND relforcerowsecurity) AS forced FROM pg_class WHERE relnamespace='nukhabapay'::regnamespace AND relname LIKE 'catalogue_publication_%' AND relkind='r'");
+        assert.deepEqual(forced.rows[0],{n:4,forced:true});
+        for(const table of ["catalogue_publication_candidates","catalogue_publication_sources","catalogue_publication_requests","catalogue_publication_events"]){
+          assert.equal((await owner.query("SELECT has_table_privilege($1,$2,'SELECT') AS s,has_table_privilege($1,$2,'INSERT') AS i,has_table_privilege($1,$2,'UPDATE') AS u,has_table_privilege($1,$2,'DELETE') AS d",[writerRole,`nukhabapay.${table}`])).rows[0].s,true);
+          const row=(await owner.query("SELECT has_table_privilege($1,$2,'INSERT') AS i,has_table_privilege($1,$2,'UPDATE') AS u,has_table_privilege($1,$2,'DELETE') AS d",[writerRole,`nukhabapay.${table}`])).rows[0];assert.deepEqual(row,{i:true,u:false,d:false});
+          for(const workload of ["nukhabapay_runtime","nukhabapay_importer","nukhabapay_identity_reader","nukhabapay_identity_writer"])
+            assert.equal((await owner.query("SELECT has_any_column_privilege($1,$2,'SELECT,INSERT,UPDATE') OR has_table_privilege($1,$2,'DELETE') AS yes",[workload,`nukhabapay.${table}`])).rows[0].yes,false);
+        }
+        assert.equal((await owner.query("SELECT has_any_column_privilege($1,'nukhabapay.staff_users','SELECT,INSERT,UPDATE') OR has_table_privilege($1,'nukhabapay.staff_users','DELETE') AS yes",[writerRole])).rows[0].yes,false);
+        for(const source of ["provider_accounts","provider_snapshots","provider_offers"])
+          assert.equal((await owner.query("SELECT has_any_column_privilege($1,$2,'SELECT,INSERT,UPDATE') AS yes",[writerRole,`nukhabapay.${source}`])).rows[0].yes,false);
+        for(const projection of ["catalogue_publication_provider_accounts","catalogue_publication_provider_snapshots","catalogue_publication_provider_offers"])
+          assert.equal((await owner.query("SELECT has_table_privilege($1,$2,'SELECT') AS yes",[writerRole,`nukhabapay.${projection}`])).rows[0].yes,true);
+        await assert.rejects(()=>writer!.query("UPDATE nukhabapay.catalogue_publication_candidates SET status='DRAFT'"),{code:"42501"});
+        assert.equal((await writer!.query("SELECT count(*)::int AS n FROM nukhabapay.catalogue_publication_candidates")).rows[0].n,0);
+      });
+
+      await t.test("concurrent generation converges, replay is strict and cross-tenant evidence is denied",async()=>{
+        await assert.rejects(()=>store!.save({...candidate}),/Untrusted publication candidate/);
+        const results=await Promise.all(Array.from({length:8},()=>store!.save(candidate)));
+        assert.equal(results.filter(result=>result.outcome==="CREATED").length,1);assert.equal(results.filter(result=>result.outcome==="REPLAYED").length,7);
+        const changed=generateDraftPublicationCandidate({...request,pricingPolicy:{...policy,version:"publication-policy-v2"}});
+        await assert.rejects(()=>store!.save(changed),PublicationDraftConflictError);
+        const otherKey=generateDraftPublicationCandidate({...request,idempotencyKey:randomUUID()});
+        assert.equal((await store!.save(otherKey)).outcome,"REPLAYED");
+        const stale=generateDraftPublicationCandidate({...request,idempotencyKey:randomUUID(),pricingPolicy:{...policy,version:"publication-policy-v3"}});
+        await assert.rejects(()=>store!.save(stale),PublicationDraftStaleError);
+        const crossTenant=generateDraftPublicationCandidate({...request,tenantId:otherTenantId,idempotencyKey:randomUUID()});
+        await assert.rejects(()=>store!.save(crossTenant),PublicationDraftConflictError);
+        const counts=(await fixture.fixtureClient.query("SELECT (SELECT count(*)::int FROM nukhabapay.catalogue_publication_candidates) candidates,(SELECT count(*)::int FROM nukhabapay.catalogue_publication_requests) requests,(SELECT count(*)::int FROM nukhabapay.catalogue_publication_events) events")).rows[0];
+        assert.deepEqual(counts,{candidates:1,requests:2,events:1});
+      });
+
+      await t.test("version advancement is explicit and audit failure rolls back every record",async()=>{
+        const versionTwo=generateDraftPublicationCandidate({...request,expectedPreviousVersion:1,idempotencyKey:randomUUID(),pricingPolicy:{...policy,version:"publication-policy-v2"}});
+        assert.deepEqual(await store!.save(versionTwo),{candidateId:versionTwo.candidateId,priceVersion:2,outcome:"CREATED",execution:"NOT_AUTHORIZED"});
+        await owner.query(`CREATE FUNCTION nukhabapay.reject_test_publication_event() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog AS $f$ BEGIN RAISE EXCEPTION 'synthetic audit outage' USING ERRCODE='40001'; END $f$`);
+        await owner.query("REVOKE ALL ON FUNCTION nukhabapay.reject_test_publication_event() FROM PUBLIC");
+        await owner.query("CREATE TRIGGER reject_test_publication_event BEFORE INSERT ON nukhabapay.catalogue_publication_events FOR EACH ROW EXECUTE FUNCTION nukhabapay.reject_test_publication_event()");
+        try {
+          const versionThree=generateDraftPublicationCandidate({...request,expectedPreviousVersion:2,idempotencyKey:randomUUID(),pricingPolicy:{...policy,version:"publication-policy-v3"}});
+          await assert.rejects(()=>store!.save(versionThree),{code:"40001"});
+        } finally {await owner.query("DROP TRIGGER reject_test_publication_event ON nukhabapay.catalogue_publication_events");await owner.query("DROP FUNCTION nukhabapay.reject_test_publication_event() ");}
+        const counts=(await fixture.fixtureClient.query("SELECT (SELECT count(*)::int FROM nukhabapay.catalogue_publication_candidates) candidates,(SELECT count(*)::int FROM nukhabapay.catalogue_publication_sources) sources,(SELECT count(*)::int FROM nukhabapay.catalogue_publication_requests) requests,(SELECT count(*)::int FROM nukhabapay.catalogue_publication_events) events")).rows[0];
+        assert.deepEqual(counts,{candidates:2,sources:2,requests:3,events:2});
+        assert.equal((await fixture.fixtureClient.query("SELECT bool_and(status='DRAFT' AND execution='NOT_AUTHORIZED' AND NOT activation_allowed) AS safe FROM nukhabapay.catalogue_publication_candidates")).rows[0].safe,true);
+      });
+
+      await t.test("tenant RLS hides records without exact scope and connections recover after failures",async()=>{
+        await writer!.query("BEGIN");try {await writer!.query("SELECT set_config('nukhabapay.publication_tenant_id',$1,true)",[tenantId]);assert.equal((await writer!.query("SELECT count(*)::int AS n FROM nukhabapay.catalogue_publication_candidates")).rows[0].n,2);}finally{await writer!.query("ROLLBACK");}
+        await writer!.query("BEGIN");try {await writer!.query("SELECT set_config('nukhabapay.publication_tenant_id',$1,true)",[otherTenantId]);assert.equal((await writer!.query("SELECT count(*)::int AS n FROM nukhabapay.catalogue_publication_candidates")).rows[0].n,0);}finally{await writer!.query("ROLLBACK");}
+        const replay=await store!.save(candidate);assert.equal(replay.outcome,"REPLAYED");
+      });
+    } finally {
+      await writer?.end().catch(()=>undefined);await store?.close().catch(()=>undefined);await owner.end().catch(()=>undefined);
+      for(const role of [writerRole,hostileRole]){
+        const exists=(await fixture.fixtureClient.query("SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname=$1) AS yes",[role])).rows[0].yes;
+        if(exists){await fixture.fixtureClient.query(`DROP OWNED BY ${identifier(role)}`);await fixture.fixtureClient.query(`DROP ROLE ${identifier(role)}`);}
+      }
+    }
+  },"b3b3",0);
+});
