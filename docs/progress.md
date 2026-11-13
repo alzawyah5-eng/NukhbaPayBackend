@@ -1,5 +1,9 @@
 # Implementation progress
 
+## Current increment: controlled A/B/C local integration
+
+13 November 2026: **MERGES COMPLETE; INTEGRATED ACCEPTANCE NO-GO.** All three reviewed branch histories are merged locally in A/B/C order, with explicit historical checkout-byte rules and safe provider-logout integration. All 398 distinct executable tests passed with zero failed/cancelled/skipped cases, including the complete disposable catalogue/IAM/session/restore regression. Persistent development history remained 001-003 and database/role inventories were restored. The final required structure check failed because its generic admin-web client rule includes the trusted Node BFF and server test fixtures. The checker remains unchanged; no exemption, rollback or additional implementation was attempted after that gate. See [the integration record](security/three-branch-integration.md) for exact commits, dependency approvals, conflict resolutions, commands and the required narrowly reviewed architecture-check correction. Persistent IAM, real Auth0 login, staff mutations, accepted privileged approvals and financial execution remain disabled.
+
 ## Current increment: Brick 4A draft catalogue publication foundation
 
 13 November 2026: **COMPLETE for local synthetic draft generation and disposable PostgreSQL acceptance; publication activation remains BLOCKED** (ADR 0026).

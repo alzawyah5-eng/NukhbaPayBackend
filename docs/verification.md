@@ -1,5 +1,26 @@
 # Verification record
 
+## Controlled three-branch local integration
+
+13 November 2026, Asia/Dubai. Track A merge `2bd5993`, checkout-byte fix `e2db251`, Track B merge `56d13ef`, and resolved Track C merge `5e7e932` preserve all three reviewed histories. The [integration record](security/three-branch-integration.md) contains exact full commit IDs, protected-byte policy, dependency approval and logout/preview resolution details.
+
+Completed focused gates: 7 deterministic database-preparation tests, staff build/typecheck and 22 synthetic BFF/browser tests, 94 application tests, and 48 API tests; zero failed/cancelled/skipped. Track B independently passed 14 staff/94 application/48 API tests before C was merged. Explicit ephemeral localhost certificates were pinned per client; Windows trust was unchanged and private temporary material was removed.
+
+Final regression completed. **398 distinct executable tests passed, zero failed/cancelled/skipped test cases. Overall integration acceptance is NO-GO because the required structure command failed.** The redacted `threebranch-final-20261113T155832281Z.log` and adjacent results under sibling recovery-checkpoints record actual completed commands. Install/network and Vite filesystem sandbox failures required approved elevation; no dependency version, source checksum, compiler setting, assertion or TLS verification was weakened.
+
+| Command | Actual result |
+| --- | --- |
+| `pnpm.cmd application:typecheck`, `pnpm.cmd db:typecheck`, `pnpm.cmd api:typecheck` | Passed |
+| `pnpm.cmd catalogue:publication:test:regression` | 6 publication, 18 database, 34 combined migration/security/restore tests passed |
+| `pnpm.cmd --filter @nukhbapay/api test:identity:integration` | 123 passed |
+| `pnpm.cmd staff:sessions:test:integration` | 18 passed |
+| `pnpm.cmd test` | 19 financial/provider tests passed |
+| `pnpm.cmd demo` | Passed; AED 102.00 total, AED 2.77 contribution, executable false |
+| `python -B -m unittest discover -s apps/ai-service/tests -v` | 9 passed |
+| `python -B scripts/check_structure.py` | FAILED, exit 1: trusted BFF/server-fixture application imports are classified as browser imports |
+
+The three reported files are `apps/admin-web/src/auth0.ts`, `apps/admin-web/test/auth0.spec.ts` and `apps/admin-web/test/fixtures/auth0-fixture.ts`. Read-only inspection confirms the rule scans the whole admin-web tree without distinguishing its trusted server from its browser `client/`. The checker was preserved and no automatic exemption or assertion weakening occurred. A reviewed boundary correction with negative browser-import coverage is required before final integrated acceptance. Source merges remain preserved. Postchecks confirmed persistent history 001-003 and unchanged database/generated-role inventory. This failure is not a passing or skipped check.
+
 ## Track B Auth0 browser login source acceptance
 
 13 November 2026, Asia/Dubai; branch `brick3/auth0-login`. Implemented gated BFF authorization-code login with S256 PKCE, one-use state/nonce/browser transactions, exact callback and token trust validation, signed fresh MFA checks, existing trusted staff/tenant/session binding, rotation and CSRF-protected local/provider logout handoff. See [configuration and security contract](security/staff-auth0-login.md).
