@@ -8,7 +8,6 @@ import { verifiedMigrationSources } from './rehearse-reviewed-migrations.mjs';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const require=createRequire(path.join(root,'packages/database/package.json'));
-const {Client}=require('pg');
 const expectedHistory=['001_catalog','002_import_role_privileges','003_import_role_read_access'];
 const exactRoles={DB_RUNTIME_ROLE:'nukhabapay_runtime',DB_IMPORT_ROLE:'nukhabapay_importer',
   DB_IDENTITY_READER_ROLE:'nukhabapay_identity_reader',DB_IDENTITY_WRITER_ROLE:'nukhabapay_identity_writer'};
@@ -48,6 +47,7 @@ export function parsePersistentDevelopmentPreflightEnvironment(env,sourceRoot=ro
 }
 
 async function verifyPasswordAuthentication(connectionString) {
+  const {Client}=require('pg');
   const wrong=new URL(connectionString);wrong.password=randomBytes(32).toString('hex');
   const probe=new Client({connectionString:wrong.href,connectionTimeoutMillis:2000});
   let connected=false;
@@ -118,6 +118,7 @@ export async function verifyPersistentTargetEvidence(client,config) {
 
 export async function inspectPersistentDevelopmentDeployment(env,sourceRoot=root) {
   const config=parsePersistentDevelopmentPreflightEnvironment(env,sourceRoot);
+  const {Client}=require('pg');
   const client=new Client({connectionString:config.connectionString,connectionTimeoutMillis:3000,statement_timeout:15000,query_timeout:18000});
   let transaction=false;
   try {

@@ -1,0 +1,4 @@
+# Immutable sources hashed as LF bytes in REGISTERED_MIGRATIONS_V1.
+packages/database/pending-migrations/004_identity_default_acl_preflight.sql text eol=lf
+packages/database/migrations/006_staff_server_sessions.ts text eol=lf
+packages/database/roles/grant_identity_validity_reader.sql text eol=lf
