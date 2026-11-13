@@ -1,5 +1,9 @@
 # Development IAM deployment preparation
 
+Track A operator review: [SCRAM recovery, authentication matrix and restricted activation contract](database-security-operator-review.md).
+The source-only preparation wrapper is `node scripts/prepare-persistent-iam-activation.mjs --prepare`;
+it has no execution mode and does not resolve the persistent-source transition gate.
+
 Status: **IMPLEMENTED READINESS CONTROLS — NO-GO for persistent migration**. Updated 13 November 2026 after source-only safeguards, read-only target inspection and disposable acceptance. This document authorizes no database, role, credential, Auth0, certificate or staff-data change.
 
 ADR 0025 adds the disabled-by-default `persistent-development-preflight-v1` profile. The only exposed command is `pnpm.cmd db:preflight:persistent-development`; there is deliberately no persistent apply command. The profile verifies the manifest before connecting and then verifies exact target identity, owner, role flags/memberships, 001–003 history, database/schema ACLs, absent IAM/session objects, quiescence and SCRAM password enforcement. It rejects test-admin/disposable settings and production-like environment labels. Registered 004–006 and the disposable runner are byte-for-byte unchanged.

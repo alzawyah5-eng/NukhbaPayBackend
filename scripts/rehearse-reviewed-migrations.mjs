@@ -7,7 +7,6 @@ import { fileURLToPath } from 'node:url';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const require=createRequire(path.join(root,'packages/database/package.json'));
-const {Client}=require('pg'),{runner,PG_MIGRATE_LOCK_ID}=require('node-pg-migrate');
 const frozen={
   '001_catalog.ts':'3f26bf82ace865d086d2d2f5471a8db0c5544e6459ab388b69a26e093a59c09c',
   '002_import_role_privileges.ts':'520dfef71a3cc5fb741c87ebf509ed3d4299b84f15394112778db577ebb5ffae',
@@ -31,6 +30,7 @@ export function verifiedMigrationSources(sourceRoot=root) {
   return {manifest,snapshot};
 }
 export async function rehearseReviewedMigrations(connectionString) {
+  const {Client}=require('pg'),{runner,PG_MIGRATE_LOCK_ID}=require('node-pg-migrate');
   const {manifest,snapshot}=verifiedMigrationSources();
   for(const [name,role] of Object.entries({DB_RUNTIME_ROLE:'nukhabapay_runtime',DB_IMPORT_ROLE:'nukhabapay_importer',
     DB_IDENTITY_READER_ROLE:'nukhabapay_identity_reader',DB_IDENTITY_WRITER_ROLE:'nukhabapay_identity_writer'})) {
