@@ -4,8 +4,10 @@ import { readFileSync } from "node:fs";
 import { X509Certificate } from "node:crypto";
 import { request } from "node:https";
 import { rootCertificates } from "node:tls";
+import { createServer as createNetServer } from "node:net";
 import { createStaffPortal, staffCookie } from "../src/portal.js";
 import { startStaffPortal } from "../src/main.js";
+import { fixture } from "./fixtures/auth0-fixture.js";
 
 let pfx:Buffer,certificate:Buffer,passphrase:string,ca:string;
 before(()=>{
@@ -69,5 +71,50 @@ test('host-only session cookies and CSRF protect logout; failed audit/revocation
     assert.equal(revokes,0);failure=true;assert.equal((await call(app.origin,'/auth/logout','POST',valid,'{}')).status,503);
     failure=false;const logout=await call(app.origin,'/auth/logout','POST',valid,'{}');assert.equal(logout.status,204);
     assert.equal(String(logout.headers['set-cookie']).includes('Max-Age=0'),true);assert.equal((await call(app.origin,'/auth/session','GET',header)).status,401);
+  }finally{await app.close();}
+});
+
+test('mock Auth0 browser round trip admits only the exact callback; logout revokes session and pending login',async()=>{
+  const reservation=createNetServer();
+  await new Promise<void>(resolve=>reservation.listen(0,'127.0.0.1',resolve));
+  const address=reservation.address();assert.ok(address && typeof address!=='string');const port=address.port;
+  await new Promise<void>(resolve=>reservation.close(()=>resolve()));
+  const origin=`https://localhost:${port}`,f=await fixture(`${origin}/auth/callback`);
+  const app=await createStaffPortal({pfx,certificate,passphrase,port,sessions:f.sessions,login:f.login});
+  try {
+    assert.equal((await call(origin,'/auth/login','GET',{'sec-fetch-site':'cross-site'})).status,403);
+    assert.equal((await call(origin,'/auth/login?tenant=forged')).status,404);
+    const start=await call(origin,'/auth/login','GET',{'sec-fetch-site':'none'});
+    assert.equal(start.status,303);assert.equal(start.body,'');
+    const auth=new URL(start.headers.location!),cookie=start.headers['set-cookie']![0]!.split(';')[0]!;
+    // Fixture signs the nonce from the actual browser redirect, without contacting Auth0.
+    f.id({nonce:auth.searchParams.get('nonce')!});
+    const path='/auth/callback?'+new URLSearchParams({code:'synthetic-code',state:auth.searchParams.get('state')!});
+    assert.equal((await call(origin,path,'GET',{cookie,'sec-fetch-site':'cross-site','sec-fetch-mode':'cors'})).status,403);
+    assert.equal((await call(origin,path,'POST',{cookie,'sec-fetch-site':'cross-site'})).status,403);
+    assert.equal((await call(origin,path,'GET',{cookie,origin:'https://attacker.invalid'})).status,403);
+    const callback=await call(origin,path,'GET',{cookie,'sec-fetch-site':'cross-site','sec-fetch-mode':'navigate','sec-fetch-dest':'document'});
+    assert.equal(callback.status,303);assert.equal(callback.headers.location,'/');assert.equal(callback.body,'');
+    assert.equal(callback.headers['referrer-policy'],'no-referrer');assert.equal(callback.headers['cache-control'],'no-store');
+    const session=callback.headers['set-cookie']!.find(v=>v.startsWith('__Host-nukhbapay_staff='))!;
+    assert.match(session,/Secure; HttpOnly; SameSite=Strict/);
+    const raw=session.split(';')[0]!,status=await call(origin,'/auth/session','GET',{cookie:raw});assert.equal(status.status,200);
+    const replay=await call(origin,path,'GET',{cookie,'sec-fetch-site':'cross-site'});assert.equal(replay.status,401);
+    assert.deepEqual(JSON.parse(replay.body),{error:'Staff authentication failed'});
+    const pending=await call(origin,'/auth/login','GET',{cookie:raw});assert.equal(pending.status,303);
+    const pendingCookie=pending.headers['set-cookie']![0]!.split(';')[0]!;
+    const logout=await call(origin,'/auth/logout','POST',{cookie:raw+'; '+pendingCookie,origin,'content-type':'application/json',
+      'x-csrf-token':JSON.parse(status.body).csrfToken as string},'{}');
+    assert.equal(logout.status,200);assert.equal(logout.headers['set-cookie']!.length,2);
+    const logoutUrl=new URL(JSON.parse(logout.body).logoutUrl as string);
+    assert.equal(logoutUrl.origin,'https://auth.synthetic.invalid');assert.equal(logoutUrl.pathname,'/v2/logout');
+    assert.equal(logoutUrl.searchParams.get('returnTo'),origin+'/auth/logged-out');assert.equal(logoutUrl.searchParams.has('client_secret'),false);
+    assert.equal((await call(origin,'/auth/logged-out','GET',{'sec-fetch-site':'cross-site','sec-fetch-mode':'navigate','sec-fetch-dest':'document'})).status,200);
+    assert.equal((await call(origin,'/auth/logged-out?returnTo=forged','GET',{'sec-fetch-site':'cross-site'})).status,403);
+    assert.equal((await call(origin,'/auth/session','GET',{cookie:raw})).status,401);
+    const pendingAuth=new URL(pending.headers.location!);
+    assert.equal((await call(origin,'/auth/callback?'+new URLSearchParams({code:'synthetic-code',state:pendingAuth.searchParams.get('state')!}),
+      'GET',{cookie:pendingCookie,'sec-fetch-site':'cross-site'})).status,401);
+    assert.equal(f.exchanges(),1);
   }finally{await app.close();}
 });

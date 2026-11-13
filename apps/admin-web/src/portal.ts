@@ -1,6 +1,7 @@
 import { createServer, request, type Server } from "node:https";
 import { createHmac, randomBytes, timingSafeEqual, X509Certificate } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { Auth0Login, TRANSACTION_COOKIE_NAME, transactionCookie } from "./auth0.js";
 
 export const PORTAL_COOKIE_NAME="__Host-nukhbapay_staff";
 export interface InternalSessionPort {
@@ -13,13 +14,13 @@ export function staffCookie(value:string,clear=false):string {
   if(!tokenPattern.test(value) && !(clear && value===""))throw unavailable();
   return `${PORTAL_COOKIE_NAME}=${value}; Path=/; Secure; HttpOnly; SameSite=Strict${clear?"; Max-Age=0":""}`;
 }
-function sessionCookie(request:IncomingMessage):string|undefined {
+function sessionCookie(request:IncomingMessage,nameToFind=PORTAL_COOKIE_NAME):string|undefined {
   const values=request.headersDistinct['cookie'];
   if(!values || values.length!==1 || values[0]!.length>2048)return undefined;
   let found:string|undefined;
   for(const piece of values[0]!.split(';')) {
     const [name,...rest]=piece.trim().split('=');
-    if(name===PORTAL_COOKIE_NAME) {
+    if(name===nameToFind) {
       if(found!==undefined || rest.length!==1 || !tokenPattern.test(rest[0]!))return undefined;
       found=rest[0];
     }
@@ -29,13 +30,15 @@ function sessionCookie(request:IncomingMessage):string|undefined {
 const landing='<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Nukhbapay Staff Portal</title><h1>Nukhbapay Staff Portal</h1><p id="status">Staff sign-in is unavailable.</p><button id="logout" hidden>Sign out</button><script src="/portal.js" defer></script></html>';
 const script=`"use strict";let csrf;const status=document.getElementById("status"),button=document.getElementById("logout");
 fetch("/auth/session",{credentials:"same-origin",cache:"no-store"}).then(r=>r.ok?r.json():null).then(s=>{if(s?.authenticated===true){csrf=s.csrfToken;status.textContent="Local staff session active.";button.hidden=false;}}).catch(()=>{});
-button.addEventListener("click",async()=>{button.disabled=true;try{const r=await fetch("/auth/logout",{method:"POST",credentials:"same-origin",headers:{"content-type":"application/json","x-csrf-token":csrf},body:"{}"});if(r.ok){csrf=undefined;window.location.assign("/auth/logged-out");}else{status.textContent="Sign out could not be confirmed.";button.disabled=false;}}catch{status.textContent="Sign out could not be confirmed.";button.disabled=false;}});`;
+button.addEventListener("click",async()=>{button.disabled=true;try{const r=await fetch("/auth/logout",{method:"POST",credentials:"same-origin",headers:{"content-type":"application/json","x-csrf-token":csrf},body:"{}"});if(r.ok){csrf=undefined;window.location.assign(r.status===204?"/auth/logged-out":(await r.json()).logoutUrl);}else{status.textContent="Sign out could not be confirmed.";button.disabled=false;}}catch{status.textContent="Sign out could not be confirmed.";button.disabled=false;}});`;
 
-/** Trusted server DI only. CLI supplies no session port; no HTTP operation creates a session. */
+/** Trusted server DI only. CLI supplies neither sessions nor login. */
 export async function createStaffPortal(options:{
   readonly pfx:Buffer;readonly certificate:Buffer;readonly passphrase:string;readonly port?:number;readonly sessions?:InternalSessionPort;
+  readonly login?:Auth0Login;
 }) {
   const port=options.port??3001;
+  if(options.login && !options.sessions)throw unavailable();
   let certificate:X509Certificate;
   try {
     certificate=new X509Certificate(options.certificate);
@@ -60,7 +63,26 @@ export async function createStaffPortal(options:{
       res.setHeader("Content-Security-Policy","default-src 'none'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
       void (async()=>{
         if(req.headers.host!==new URL(origin).host || req.rawHeaders.length>128 || req.headersDistinct['host']?.length!==1){send(res,400,'{"error":"Invalid request"}');return;}
-        if(!sameOrigin(req)){send(res,403,'{"error":"Request denied"}');return;}
+        // Provider redirects may reach only the exact callback or public logged-out landing.
+        const callback=req.method==='GET' && req.url?.startsWith('/auth/callback?') && options.login;
+        const providerNavigation=callback || options.login && req.method==='GET' && req.url==='/auth/logged-out';
+        if(!sameOrigin(req) && !(providerNavigation && !req.headersDistinct['origin'] &&
+          (!req.headersDistinct['sec-fetch-site'] || req.headersDistinct['sec-fetch-site'].length===1 && ['cross-site','same-site'].includes(String(req.headers['sec-fetch-site']))) &&
+          (!req.headersDistinct['sec-fetch-mode'] || req.headersDistinct['sec-fetch-mode'].length===1 && req.headers['sec-fetch-mode']==='navigate') &&
+          (!req.headersDistinct['sec-fetch-dest'] || req.headersDistinct['sec-fetch-dest'].length===1 && req.headers['sec-fetch-dest']==='document'))){send(res,403,'{"error":"Request denied"}');return;}
+        if(req.method==='GET' && req.url==='/auth/login' && options.login) {
+          const transaction=options.login.begin(sessionCookie(req),sessionCookie(req,TRANSACTION_COOKIE_NAME));
+          res.setHeader('Set-Cookie',transaction.cookie);res.writeHead(303,{location:transaction.location});res.end();return;
+        }
+        if(callback) {
+          res.setHeader('Set-Cookie',transactionCookie('',true));
+          try {
+            const token=await options.login!.complete(req.url!,sessionCookie(req,TRANSACTION_COOKIE_NAME),sessionCookie(req));
+            res.setHeader('Set-Cookie',[transactionCookie('',true),staffCookie(token)]);
+            res.writeHead(303,{location:'/'});res.end();
+          }catch{send(res,401,'{"error":"Staff authentication failed"}');}
+          return;
+        }
         if(req.method==="GET" && (req.url==="/" || req.url==="/auth/logged-out")){send(res,200,landing,"text/html");return;}
         if(req.method==="GET" && req.url==="/portal.js"){send(res,200,script,"text/javascript");return;}
         if(req.method==="GET" && req.url==="/health/live"){send(res,200,'{"status":"ok"}');return;}
@@ -81,9 +103,12 @@ export async function createStaffPortal(options:{
           let input:unknown;try{input=JSON.parse(body);}catch{send(res,400,'{"error":"Invalid request"}');return;}
           if(!input || typeof input!=="object" || Array.isArray(input) || Object.keys(input).length!==0){send(res,400,'{"error":"Invalid request"}');return;}
           if(!options.sessions){send(res,503,'{"error":"Session service unavailable"}');return;}
+          // Cancel before awaiting persistence, so a pending callback cannot finish during revocation.
+          options.login?.cancel(sessionCookie(req,TRANSACTION_COOKIE_NAME));
           const result=await options.sessions.revoke(token);
           if(!result.ok){send(res,503,'{"error":"Sign out not confirmed"}');return;}
-          res.setHeader("Set-Cookie",staffCookie("",true));send(res,204,"");return;
+          res.setHeader("Set-Cookie",[staffCookie("",true),transactionCookie('',true)]);
+          if(options.login)send(res,200,JSON.stringify({logoutUrl:options.login.logoutUrl}));else send(res,204,"");return;
         }
         send(res,404,'{"error":"Not found"}');
       })().catch(()=>{if(!res.headersSent)send(res,503,'{"error":"Service unavailable"}');else res.destroy();});
@@ -95,6 +120,7 @@ export async function createStaffPortal(options:{
   } catch {throw unavailable();}
   const address=server.address();if(!address || typeof address==='string')throw unavailable();
   origin=`https://localhost:${address.port}`;
+  if(options.login && options.login.origin!==origin){await new Promise<void>(resolve=>server.close(()=>resolve()));throw unavailable();}
   try {
     // Strict certificate/hostname/expiry verification also proves the PFX matches the reviewed public certificate.
     await new Promise<void>((resolve,reject)=>{
@@ -105,5 +131,5 @@ export async function createStaffPortal(options:{
     });
   }catch{await new Promise<void>(resolve=>server.close(()=>resolve()));throw unavailable();}
   let closing:Promise<void>|undefined;
-  return Object.freeze({origin,close:()=>closing??=new Promise<void>((resolve,reject)=>{server.close(error=>error?reject(unavailable()):resolve());server.closeIdleConnections();})});
+  return Object.freeze({origin,close:()=>closing??=new Promise<void>((resolve,reject)=>{options.login?.close();server.close(error=>error?reject(unavailable()):resolve());server.closeIdleConnections();})});
 }

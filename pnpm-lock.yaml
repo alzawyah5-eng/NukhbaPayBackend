@@ -9,6 +9,13 @@ importers:
   .: {}
 
   apps/admin-web:
+    dependencies:
+      '@nukhbapay/application':
+        specifier: workspace:*
+        version: link:../../packages/application
+      jose:
+        specifier: 6.2.17
+        version: 6.2.17
     devDependencies:
       '@types/node':
         specifier: 24.19.2
