@@ -1,6 +1,6 @@
 # Nukhbapay staff portal BFF
 
-Minimal Node 24 HTTPS server and strict TypeScript, using no new runtime framework. The API remains 127.0.0.1:3000; this BFF targets https://localhost:3001 on loopback. Real Auth0 sign-in and session activation are disabled in the CLI.
+Node 24 HTTPS BFF with the supplied React/TypeScript staff frontend integrated in `client/`. The API remains 127.0.0.1:3000; this BFF targets https://localhost:3001 on loopback. Real Auth0 sign-in and session activation are disabled in the CLI.
 
 Run `pnpm.cmd staff:build`, then follow [development certificate setup](../../docs/security/staff-server-sessions.md). Private certificates and DPAPI-protected passphrases belong outside OneDrive/source/checkpoints. Windows trust was intentionally left unchanged. Use the documented explicit pinned-client-only launcher mode with clients that trust the exact public certificate; browser trust is not established. The normal launcher otherwise requires the reviewed current-user trust entry. Never disable certificate verification.
 
@@ -8,6 +8,16 @@ The browser receives no Auth0 access token, ID token, client secret or backend s
 
 See [Track B authentication contract and activation requirements](../../docs/security/staff-auth0-login.md). All provider exchanges in tests are mocked, with signed synthetic identities. Real provider acceptance, trusted browser TLS and operational composition remain pending review.
 
+The React application supports both confirmed local logout (204) and configured provider logout (200). A provider response must match the exact public destination rendered into the HTML by trusted server composition, including client ID and return URL. Without that server policy, or on any mismatch, the browser does not navigate. The public destination contains no tokens or secrets.
+
 The internal session lifecycle and proposed PostgreSQL candidate live in the existing application/database packages, not browser code. Existing API authentication modes/JWT checks, IAM/catalogue restrictions and financial logic remain unchanged. See ADR 0022 and current verification for actual evidence and activation blockers.
 
 Commands: `pnpm.cmd staff:build`, `pnpm.cmd staff:typecheck`, `pnpm.cmd staff:test`, `pnpm.cmd staff:sessions:test:integration`. HTTPS tests require explicitly supplied local test certificate settings; integration additionally requires the existing verified disposable PostgreSQL fixture settings. Missing configuration fails rather than skipping tests.
+
+The build compiles the BFF and bundles the browser application into `dist/client`; `staff:start` requires this output. It uses the existing TLS launcher and certificate policy above. No Vite server, separate application, external hosting or public deployment is required.
+
+Normal routes (`/`, `/login`, `/overview`, `/staff`, `/staff/invite`, `/staff/:staffId`, `/roles`, `/departments`, `/access-requests`, `/security`, `/sessions`, `/audit`, `/reports`, `/settings`) check `/auth/session`. They display the supplied sign-in layout when the session is absent, denied or unavailable. With an authenticated session, staff screens currently show a service-unavailable state: `apps/api/src/app.module.ts` registers only health, and no staff-management HTTP contract exists. Client navigation is never authorization. Enabling real identity, choosing permissions, and implementing staff APIs remain backend integration prerequisites.
+
+For design review, set both server environment variables `NODE_ENV=development` and `NUKHBAPAY_STAFF_UI_PREVIEW=enabled` and restart the BFF. Preview is denied by default and in production even with the opt-in flag. Both preview routes and direct demo chunk URLs return 404 when disabled; the internal Vite manifest separates static entry dependencies from dynamic demo chunks. Then explicitly open `/preview/overview` through the same HTTPS BFF. All thirteen supplied screens are retained under `/preview` (including `/preview/login` and `/preview/staff/stf-1001`; select an actual profile via the directory). This separate lazy-loaded branch uses the handover's clearly labeled fictional, in-memory data and demo interactions. It never authenticates, writes to the platform, or serves as a fallback after an API failure. It is not a production staff-management implementation.
+
+Brand tokens, supplied logo, components, screen structure and responsive CSS came from `frontend-handover/nukhbapay-staff-react`. Original handover files remain untouched. The design folder contains all 13 PNG screens, the `.fig` backup, foundations, button/badge assets, logo, and developer handoff. See [integration evidence and limits](../../docs/staff-dashboard-integration.md).

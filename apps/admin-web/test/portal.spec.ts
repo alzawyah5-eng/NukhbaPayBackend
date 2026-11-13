@@ -4,10 +4,12 @@ import { readFileSync } from "node:fs";
 import { X509Certificate } from "node:crypto";
 import { request } from "node:https";
 import { rootCertificates } from "node:tls";
+import { fileURLToPath } from "node:url";
 import { createServer as createNetServer } from "node:net";
 import { createStaffPortal, staffCookie } from "../src/portal.js";
 import { startStaffPortal } from "../src/main.js";
 import { fixture } from "./fixtures/auth0-fixture.js";
+import { loadBrowserAssets } from "../src/browser-assets.js";
 
 let pfx:Buffer,certificate:Buffer,passphrase:string,ca:string;
 before(()=>{
@@ -117,4 +119,92 @@ test('mock Auth0 browser round trip admits only the exact callback; logout revok
       'GET',{cookie:pendingCookie,'sec-fetch-site':'cross-site'})).status,401);
     assert.equal(f.exchanges(),1);
   }finally{await app.close();}
+});
+test('integrated browser routes and assets retain HTTPS transport and auth boundaries',async()=>{
+  const html=Buffer.from('<div id="root"></div><script src="/assets/test.js"></script>');
+  const app=await createStaffPortal({pfx,certificate,passphrase,port:0,environment:{NODE_ENV:'development',NUKHBAPAY_STAFF_UI_PREVIEW:'enabled'},browserAssets:new Map([
+    ['/index.html',{body:html,type:'text/html'}],
+    ['/assets/test.js',{body:Buffer.from('/* public browser code */'),type:'text/javascript'}],
+    ['/assets/App-demo.js',{body:Buffer.from('Maya Rahman'),type:'text/javascript',previewOnly:true}],
+  ])});
+  try {
+    for(const path of ['/','/login','/overview','/staff?q=Maya','/staff/stf-1001','/preview/overview','/preview/login','/auth/logged-out']) {
+      const response=await call(app.origin,path);
+      assert.equal(response.status,200,path);assert.equal(response.body,html.toString());
+      assert.equal(response.headers['cache-control'],'no-store');
+      const csp=String(response.headers['content-security-policy']);
+      assert.match(csp,/style-src 'self'/);assert.match(csp,/frame-ancestors 'none'/);assert.equal(csp.includes('unsafe-inline'),false);
+    }
+    assert.match(String((await call(app.origin,'/assets/test.js')).headers['content-type']),/text\/javascript/);
+    assert.equal((await call(app.origin,'/assets/App-demo.js')).body,'Maya Rahman');
+    for(const path of ['/.env','/src/main.tsx','/assets/test.js.map','/assets/../index.html','/%2e%2e/.env','/auth/login','/staff-api/v1/staff','/unknown']) {
+      assert.equal((await call(app.origin,path)).status,404,path);
+    }
+    assert.equal((await call(app.origin,'/preview/overview','GET',{origin:'https://attacker.invalid'})).status,403);
+    assert.equal((await call(app.origin,'/preview/overview','POST')).status,404);
+    assert.equal((await call(app.origin,'/auth/session')).status,503);
+  }finally{await app.close();}
+});
+
+test('default and production servers deny preview routes and direct demo chunk requests',async()=>{
+  for(const environment of [{},{NODE_ENV:'development'},{NODE_ENV:'production',NUKHBAPAY_STAFF_UI_PREVIEW:'enabled'}]) {
+    const app=await createStaffPortal({pfx,certificate,passphrase,port:0,environment,browserAssets:new Map([
+      ['/index.html',{body:Buffer.from('<div id="root"></div>'),type:'text/html'}],
+      ['/assets/App-demo.js',{body:Buffer.from('Maya Rahman'),type:'text/javascript',previewOnly:true}],
+    ])});
+    try {
+      for(const path of ['/preview','/preview/overview','/preview/staff?q=Maya','/assets/App-demo.js','/assets/App-demo.js?enabled=true','/%70review/overview','/preview%2foverview']) {
+        const response=await call(app.origin,path);
+        assert.equal(response.status,404,path);assert.equal(response.body.includes('Maya Rahman'),false);
+      }
+      assert.equal((await call(app.origin,'/')).status,200);
+      assert.equal((await call(app.origin,'/auth/session')).status,503);
+    }finally{await app.close();}
+  }
+});
+
+test('combined Auth0 and actual built assets preserve callback, preview isolation, logout policy and persistence failure',async()=>{
+  const assets=loadBrowserAssets(fileURLToPath(new URL('../../dist/client/',import.meta.url)));
+  const demoPaths=[...assets].filter(([,asset])=>asset.previewOnly).map(([url])=>url);
+  assert.ok(demoPaths.length>0,'The actual preview must remain in a dynamic chunk');
+  const normalChunks=[...assets].filter(([,asset])=>!asset.previewOnly && asset.type==='text/javascript');
+  for(const [,asset]of normalChunks)assert.equal(asset.body.includes(Buffer.from('Maya Rahman')),false);
+  for(const environment of [{},{NODE_ENV:'production',NUKHBAPAY_STAFF_UI_PREVIEW:'enabled'}]) {
+    const reservation=createNetServer();
+    await new Promise<void>(resolve=>reservation.listen(0,'127.0.0.1',resolve));
+    const address=reservation.address();assert.ok(address&&typeof address!=='string');
+    const port=address.port;await new Promise<void>(resolve=>reservation.close(()=>resolve()));
+    const origin=`https://localhost:${port}`,f=await fixture(`${origin}/auth/callback`);
+    const app=await createStaffPortal({pfx,certificate,passphrase,port,sessions:f.sessions,login:f.login,browserAssets:assets,environment});
+    try {
+      const landing=await call(origin,'/staff?q=synthetic');
+      assert.equal(landing.status,200);assert.match(landing.body,/name="nukhbapay-provider-logout"/);
+      assert.ok(landing.body.includes(f.login.logoutUrl.replaceAll('&','&amp;')));
+      assert.equal(landing.body.includes('synthetic-secret-'),false);
+      assert.equal((await call(origin,'/staff','GET',{'sec-fetch-site':'cross-site'})).status,403);
+      for(const url of ['/preview','/preview/overview',...demoPaths,'/frontend-handover/nukhbapay-staff-react/index.html'])
+        assert.equal((await call(origin,url)).status,404,url);
+      const start=await call(origin,'/auth/login');assert.equal(start.status,303);
+      const auth=new URL(start.headers.location!),transaction=start.headers['set-cookie']![0]!.split(';')[0]!;
+      f.id({nonce:auth.searchParams.get('nonce')!});
+      const callback='/auth/callback?'+new URLSearchParams({code:'synthetic-code',state:auth.searchParams.get('state')!});
+      const result=await call(origin,callback,'GET',{cookie:transaction,'sec-fetch-site':'cross-site','sec-fetch-mode':'navigate','sec-fetch-dest':'document'});
+      assert.equal(result.status,303);assert.equal(result.headers.location,'/');
+      assert.equal((await call(origin,callback,'GET',{cookie:transaction,'sec-fetch-site':'cross-site'})).status,401);
+      const session=result.headers['set-cookie']!.find(cookie=>cookie.startsWith('__Host-nukhbapay_staff='))!.split(';')[0]!;
+      const status=await call(origin,'/auth/session','GET',{cookie:session});assert.equal(status.status,200);
+      // Revocation audit belongs to the atomic session store, not the identity lookup audit writer.
+      if(environment.NODE_ENV==='production')f.store();
+      const logout=await call(origin,'/auth/logout','POST',{cookie:session,origin,'content-type':'application/json',
+        'x-csrf-token':JSON.parse(status.body).csrfToken as string},'{}');
+      if(environment.NODE_ENV==='production') {
+        assert.equal(logout.status,503);assert.equal(logout.headers['set-cookie'],undefined);assert.equal(logout.body.includes('logoutUrl'),false);
+      }else {
+        assert.equal(logout.status,200);assert.deepEqual(JSON.parse(logout.body),{logoutUrl:f.login.logoutUrl});
+        assert.equal((await call(origin,'/auth/session','GET',{cookie:session})).status,401);
+      }
+      assert.equal((await call(origin,'/auth/logged-out','GET',{'sec-fetch-site':'cross-site','sec-fetch-mode':'navigate','sec-fetch-dest':'document'})).status,200);
+      assert.equal((await call(origin,'/auth/logged-out?returnTo=forged','GET',{'sec-fetch-site':'cross-site'})).status,403);
+    } finally {await app.close();}
+  }
 });

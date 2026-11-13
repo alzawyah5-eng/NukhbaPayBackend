@@ -2,6 +2,7 @@ import { createServer, request, type Server } from "node:https";
 import { createHmac, randomBytes, timingSafeEqual, X509Certificate } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Auth0Login, TRANSACTION_COOKIE_NAME, transactionCookie } from "./auth0.js";
+import { browserAsset, developmentPreviewEnabled, type BrowserAssets } from './browser-assets.js';
 
 export const PORTAL_COOKIE_NAME="__Host-nukhbapay_staff";
 export interface InternalSessionPort {
@@ -30,14 +31,24 @@ function sessionCookie(request:IncomingMessage,nameToFind=PORTAL_COOKIE_NAME):st
 const landing='<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Nukhbapay Staff Portal</title><h1>Nukhbapay Staff Portal</h1><p id="status">Staff sign-in is unavailable.</p><button id="logout" hidden>Sign out</button><script src="/portal.js" defer></script></html>';
 const script=`"use strict";let csrf;const status=document.getElementById("status"),button=document.getElementById("logout");
 fetch("/auth/session",{credentials:"same-origin",cache:"no-store"}).then(r=>r.ok?r.json():null).then(s=>{if(s?.authenticated===true){csrf=s.csrfToken;status.textContent="Local staff session active.";button.hidden=false;}}).catch(()=>{});
-button.addEventListener("click",async()=>{button.disabled=true;try{const r=await fetch("/auth/logout",{method:"POST",credentials:"same-origin",headers:{"content-type":"application/json","x-csrf-token":csrf},body:"{}"});if(r.ok){csrf=undefined;window.location.assign(r.status===204?"/auth/logged-out":(await r.json()).logoutUrl);}else{status.textContent="Sign out could not be confirmed.";button.disabled=false;}}catch{status.textContent="Sign out could not be confirmed.";button.disabled=false;}});`;
+button.addEventListener("click",async()=>{button.disabled=true;try{const r=await fetch("/auth/logout",{method:"POST",credentials:"same-origin",headers:{"content-type":"application/json","x-csrf-token":csrf},body:"{}"});let destination;if(r.status===204)destination="/auth/logged-out";else if(r.status===200 && expectedLogoutUrl && (await r.json()).logoutUrl===expectedLogoutUrl)destination=expectedLogoutUrl;else throw new Error();csrf=undefined;window.location.assign(destination);}catch{status.textContent="Sign out could not be confirmed.";button.disabled=false;}});`;
+
+function htmlLogoutPolicy(body:Buffer,destination:string):Buffer {
+  const html=body.toString('utf8');
+  if(!/<head(?:\s[^>]*)?>/i.test(html) || /name\s*=\s*["']nukhbapay-provider-logout["']/i.test(html))throw unavailable();
+  const safe=destination.replaceAll('&','&amp;').replaceAll('"','&quot;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+  return Buffer.from(html.replace(/<head(?:\s[^>]*)?>/i,head=>`${head}<meta name="nukhbapay-provider-logout" content="${safe}">`));
+}
 
 /** Trusted server DI only. CLI supplies neither sessions nor login. */
 export async function createStaffPortal(options:{
   readonly pfx:Buffer;readonly certificate:Buffer;readonly passphrase:string;readonly port?:number;readonly sessions?:InternalSessionPort;
   readonly login?:Auth0Login;
+  readonly browserAssets?:BrowserAssets;
+  readonly environment?:Readonly<Record<string,string|undefined>>;
 }) {
   const port=options.port??3001;
+  const previewEnabled=developmentPreviewEnabled(options.environment??process.env);
   if(options.login && !options.sessions)throw unavailable();
   let certificate:X509Certificate;
   try {
@@ -52,7 +63,7 @@ export async function createStaffPortal(options:{
     (!req.headersDistinct['origin'] || req.headersDistinct['origin'].length===1 && req.headers.origin===origin) &&
     (!req.headersDistinct['sec-fetch-site'] || req.headersDistinct['sec-fetch-site'].length===1 &&
       (req.headers['sec-fetch-site']==='same-origin' || req.method==='GET' && req.headers['sec-fetch-site']==='none'));
-  const send=(res:ServerResponse,status:number,body:string,type="application/json")=>{
+  const send=(res:ServerResponse,status:number,body:string|Buffer,type="application/json")=>{
     res.writeHead(status,{"content-type":type+"; charset=utf-8"});res.end(body);
   };
   let server:Server;
@@ -61,6 +72,7 @@ export async function createStaffPortal(options:{
       res.setHeader("Cache-Control","no-store");res.setHeader("X-Content-Type-Options","nosniff");
       res.setHeader("Referrer-Policy","no-referrer");
       res.setHeader("Content-Security-Policy","default-src 'none'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
+      if(options.browserAssets)res.setHeader('Content-Security-Policy',"default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
       void (async()=>{
         if(req.headers.host!==new URL(origin).host || req.rawHeaders.length>128 || req.headersDistinct['host']?.length!==1){send(res,400,'{"error":"Invalid request"}');return;}
         // Provider redirects may reach only the exact callback or public logged-out landing.
@@ -83,8 +95,12 @@ export async function createStaffPortal(options:{
           }catch{send(res,401,'{"error":"Staff authentication failed"}');}
           return;
         }
-        if(req.method==="GET" && (req.url==="/" || req.url==="/auth/logged-out")){send(res,200,landing,"text/html");return;}
-        if(req.method==="GET" && req.url==="/portal.js"){send(res,200,script,"text/javascript");return;}
+        if(req.method==='GET' && options.browserAssets && req.url){
+          const asset=browserAsset(options.browserAssets,req.url,previewEnabled);
+          if(asset){send(res,200,asset.type==='text/html' && options.login?htmlLogoutPolicy(asset.body,options.login.logoutUrl):asset.body,asset.type);return;}
+        }
+        if(!options.browserAssets && req.method==="GET" && (req.url==="/" || req.url==="/auth/logged-out")){send(res,200,landing,"text/html");return;}
+        if(req.method==="GET" && req.url==="/portal.js"){send(res,200,`const expectedLogoutUrl=${JSON.stringify(options.login?.logoutUrl??null)};\n${script}`,"text/javascript");return;}
         if(req.method==="GET" && req.url==="/health/live"){send(res,200,'{"status":"ok"}');return;}
         if(req.method==="GET" && req.url==="/auth/session") {
           if(!options.sessions){send(res,503,'{"error":"Session service unavailable"}');return;}
