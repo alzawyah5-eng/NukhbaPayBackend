@@ -1,6 +1,7 @@
 import { createServer, request, type Server } from "node:https";
 import { createHmac, randomBytes, timingSafeEqual, X509Certificate } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { browserAsset, developmentPreviewEnabled, type BrowserAssets } from './browser-assets.js';
 
 export const PORTAL_COOKIE_NAME="__Host-nukhbapay_staff";
 export interface InternalSessionPort {
@@ -34,8 +35,11 @@ button.addEventListener("click",async()=>{button.disabled=true;try{const r=await
 /** Trusted server DI only. CLI supplies no session port; no HTTP operation creates a session. */
 export async function createStaffPortal(options:{
   readonly pfx:Buffer;readonly certificate:Buffer;readonly passphrase:string;readonly port?:number;readonly sessions?:InternalSessionPort;
+  readonly browserAssets?:BrowserAssets;
+  readonly environment?:Readonly<Record<string,string|undefined>>;
 }) {
   const port=options.port??3001;
+  const previewEnabled=developmentPreviewEnabled(options.environment??process.env);
   let certificate:X509Certificate;
   try {
     certificate=new X509Certificate(options.certificate);
@@ -49,7 +53,7 @@ export async function createStaffPortal(options:{
     (!req.headersDistinct['origin'] || req.headersDistinct['origin'].length===1 && req.headers.origin===origin) &&
     (!req.headersDistinct['sec-fetch-site'] || req.headersDistinct['sec-fetch-site'].length===1 &&
       (req.headers['sec-fetch-site']==='same-origin' || req.method==='GET' && req.headers['sec-fetch-site']==='none'));
-  const send=(res:ServerResponse,status:number,body:string,type="application/json")=>{
+  const send=(res:ServerResponse,status:number,body:string|Buffer,type="application/json")=>{
     res.writeHead(status,{"content-type":type+"; charset=utf-8"});res.end(body);
   };
   let server:Server;
@@ -58,10 +62,15 @@ export async function createStaffPortal(options:{
       res.setHeader("Cache-Control","no-store");res.setHeader("X-Content-Type-Options","nosniff");
       res.setHeader("Referrer-Policy","no-referrer");
       res.setHeader("Content-Security-Policy","default-src 'none'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
+      if(options.browserAssets)res.setHeader('Content-Security-Policy',"default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
       void (async()=>{
         if(req.headers.host!==new URL(origin).host || req.rawHeaders.length>128 || req.headersDistinct['host']?.length!==1){send(res,400,'{"error":"Invalid request"}');return;}
         if(!sameOrigin(req)){send(res,403,'{"error":"Request denied"}');return;}
-        if(req.method==="GET" && (req.url==="/" || req.url==="/auth/logged-out")){send(res,200,landing,"text/html");return;}
+        if(req.method==='GET' && options.browserAssets && req.url){
+          const asset=browserAsset(options.browserAssets,req.url,previewEnabled);
+          if(asset){send(res,200,asset.body,asset.type);return;}
+        }
+        if(!options.browserAssets && req.method==="GET" && (req.url==="/" || req.url==="/auth/logged-out")){send(res,200,landing,"text/html");return;}
         if(req.method==="GET" && req.url==="/portal.js"){send(res,200,script,"text/javascript");return;}
         if(req.method==="GET" && req.url==="/health/live"){send(res,200,'{"status":"ok"}');return;}
         if(req.method==="GET" && req.url==="/auth/session") {

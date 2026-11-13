@@ -71,3 +71,46 @@ test('host-only session cookies and CSRF protect logout; failed audit/revocation
     assert.equal(String(logout.headers['set-cookie']).includes('Max-Age=0'),true);assert.equal((await call(app.origin,'/auth/session','GET',header)).status,401);
   }finally{await app.close();}
 });
+
+test('integrated browser routes and assets retain HTTPS transport and auth boundaries',async()=>{
+  const html=Buffer.from('<div id="root"></div><script src="/assets/test.js"></script>');
+  const app=await createStaffPortal({pfx,certificate,passphrase,port:0,environment:{NODE_ENV:'development',NUKHBAPAY_STAFF_UI_PREVIEW:'enabled'},browserAssets:new Map([
+    ['/index.html',{body:html,type:'text/html'}],
+    ['/assets/test.js',{body:Buffer.from('/* public browser code */'),type:'text/javascript'}],
+    ['/assets/App-demo.js',{body:Buffer.from('Maya Rahman'),type:'text/javascript',previewOnly:true}],
+  ])});
+  try {
+    for(const path of ['/','/login','/overview','/staff?q=Maya','/staff/stf-1001','/preview/overview','/preview/login','/auth/logged-out']) {
+      const response=await call(app.origin,path);
+      assert.equal(response.status,200,path);assert.equal(response.body,html.toString());
+      assert.equal(response.headers['cache-control'],'no-store');
+      const csp=String(response.headers['content-security-policy']);
+      assert.match(csp,/style-src 'self'/);assert.match(csp,/frame-ancestors 'none'/);assert.equal(csp.includes('unsafe-inline'),false);
+    }
+    assert.match(String((await call(app.origin,'/assets/test.js')).headers['content-type']),/text\/javascript/);
+    assert.equal((await call(app.origin,'/assets/App-demo.js')).body,'Maya Rahman');
+    for(const path of ['/.env','/src/main.tsx','/assets/test.js.map','/assets/../index.html','/%2e%2e/.env','/auth/login','/staff-api/v1/staff','/unknown']) {
+      assert.equal((await call(app.origin,path)).status,404,path);
+    }
+    assert.equal((await call(app.origin,'/preview/overview','GET',{origin:'https://attacker.invalid'})).status,403);
+    assert.equal((await call(app.origin,'/preview/overview','POST')).status,404);
+    assert.equal((await call(app.origin,'/auth/session')).status,503);
+  }finally{await app.close();}
+});
+
+test('default and production servers deny preview routes and direct demo chunk requests',async()=>{
+  for(const environment of [{},{NODE_ENV:'development'},{NODE_ENV:'production',NUKHBAPAY_STAFF_UI_PREVIEW:'enabled'}]) {
+    const app=await createStaffPortal({pfx,certificate,passphrase,port:0,environment,browserAssets:new Map([
+      ['/index.html',{body:Buffer.from('<div id="root"></div>'),type:'text/html'}],
+      ['/assets/App-demo.js',{body:Buffer.from('Maya Rahman'),type:'text/javascript',previewOnly:true}],
+    ])});
+    try {
+      for(const path of ['/preview','/preview/overview','/preview/staff?q=Maya','/assets/App-demo.js','/assets/App-demo.js?enabled=true','/%70review/overview','/preview%2foverview']) {
+        const response=await call(app.origin,path);
+        assert.equal(response.status,404,path);assert.equal(response.body.includes('Maya Rahman'),false);
+      }
+      assert.equal((await call(app.origin,'/')).status,200);
+      assert.equal((await call(app.origin,'/auth/session')).status,503);
+    }finally{await app.close();}
+  }
+});
