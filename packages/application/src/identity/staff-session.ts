@@ -109,6 +109,19 @@ export class StaffSessionLifecycle {
       return Object.freeze({ok:true as const,execution:"NOT_AUTHORIZED" as const,assurance:"not-established" as const});
     } catch {return failure("UNAVAILABLE");}
   }
+  /** Minimal self projection after audited store validation and fresh authority checks. */
+  async readProfile(token:string) {
+    const valid=await this.validate(token);
+    if(!valid.ok)return valid;
+    try {
+      const known=this.#known.get(hash(token));
+      if(!known || known.invalidated || known.expiresAtMs<=this.#now())return failure('DENIED');
+      const evidence=await this.dependencies.actors.inspectSessionActor(known.actor);
+      if(!isVerifiedSessionActor(evidence,known.actor) || !same(binding(evidence),known.binding) || !await evidence.revalidate())return this.#invalidate(token);
+      return Object.freeze({ok:true as const,profile:Object.freeze({staffId:evidence.staffId,tenantId:evidence.tenantId,
+        expiresAtMs:known.expiresAtMs}),execution:'NOT_AUTHORIZED' as const});
+    } catch {return failure('UNAVAILABLE');}
+  }
   async revoke(token:string) {return this.#revocation(token,"REVOKE");}
   async verifyRevocation(token:string) {return this.#revocation(token,"CHECK_REVOKED");}
   async #invalidate(token:string,invalidateActor=true) {
