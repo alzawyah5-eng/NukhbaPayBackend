@@ -1,6 +1,6 @@
-import { createImportPool } from "../packages/database/dist/pool.js";
-import { parseDatabaseConfig } from "../packages/database/dist/config.js";
-import { CatalogPostgresRepository } from "../packages/database/dist/repositories/catalog-repository.js";
+import { createImportPool } from "../packages/database/dist/database/src/pool.js";
+import { parseDatabaseConfig } from "../packages/database/dist/database/src/config.js";
+import { CatalogPostgresRepository } from "../packages/database/dist/database/src/repositories/catalog-repository.js";
 import { createSyntheticProviders } from "../packages/provider-adapters/src/mock-provider.ts";
 import { importSyntheticCatalogProvider } from "../packages/application/src/catalog/synthetic-provider-import.ts";
 

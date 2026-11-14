@@ -130,6 +130,186 @@ The ordered HBA evidence, role-secret rotation record and negative authenticatio
 
 `NUKHBAPAY_STAFF_SESSION_MODE` remains `disabled`. The isolated parser reserves `DB_STAFF_SESSION_URL`, `DB_STAFF_SESSION_ROLE`, `DB_STAFF_SESSION_EXPECTED_DATABASE_OID`, `DB_STAFF_SESSION_EXPECTED_SYSTEM_IDENTIFIER`, `DB_STAFF_SESSION_POOL_MAX`, `DB_STAFF_SESSION_CONNECTION_TIMEOUT_MS`, `DB_STAFF_SESSION_QUERY_TIMEOUT_MS` and `DB_STAFF_SESSION_STATEMENT_TIMEOUT_MS`. Persistent-development parsing requires exact local/development labels, literal loopback/5432, `nukhabapay_dev`, `nukhabapay_session_backend`, a credential, target identity and bounded timeouts. The URL is non-enumerable/redacted. Runtime registration and grants remain unimplemented, so setting these values does not authorize activation.
 
+## Dependency-ordered development activation checklist
+
+This is a preparation checklist, not an execution authorization. Persistent
+activation remains **NOT VERIFIED / NOT AUTHORIZED**; all operational checklist
+items are pending. Prepared 14 November 2026. Record
+sanitized evidence and named approvals in the approved change record; never put
+credentials, staff PII, database URLs, or password verifiers in this repository.
+Any failed, stale, ambiguous, or unavailable check is a stop condition.
+
+### Preparation — source and disposable-only readiness (engineering; no persistent writes)
+
+- [ ] Preserve the frozen 004–006 sources and historical manifest hashes. Verify
+  with `pnpm.cmd db:verify:sources`; do not edit migration history or bypass a
+  target guard.
+- [ ] Implement and review a new immutable persistent-target activation source
+  transition. Bind its reviewed source/manifest hashes, exact database OID and
+  PostgreSQL system identifier, approval, backup hash, and restored-clone
+  acceptance. Keep the existing disposable runner and migrations unchanged.
+- [ ] Implement and review the persistent session-role grant recipe and
+  connection adapter. Require the exact approved target, role, OID and system
+  identifier; retain the exact SELECT/INSERT column envelope, FORCE RLS, audit
+  append-only behavior, and deny all IAM/catalogue/workflow access.
+- [ ] Add trusted server composition for the restricted IAM reader, audit
+  writer, tenant-bound `TrustedStaffActorBoundary`, session lifecycle/store,
+  and `Auth0Login`. The CLI must remain disabled by default; partial or
+  contradictory configuration must fail startup. Never accept actors,
+  issuer, subject, tenant, roles, or permissions from browser input.
+- [ ] Exercise the new source transition, grants, adapter, and composition on
+  fresh disposable databases and a fresh restore of the development backup.
+  Include negative privilege, tenant-isolation, audit-failure, session-failure,
+  config, and browser/server-boundary assertions. Do not use the persistent
+  target for engineering tests.
+- [ ] Review and freeze the new source/manifest/checksum set before any
+  operational change. Stop if disposable or restored-clone acceptance is not
+  complete.
+
+### Stage A — change authority, quiescence, and recoverability (operations)
+
+- [ ] Obtain a named DBA, change approver, secret custodian, and recovery owner;
+  approve the exact target, maintenance window, permitted changes, retention,
+  residency, monitoring, RPO/RTO, and rollback/recovery decision path.
+- [ ] Stop and verify all project writers are quiescent. Retain and test an
+  independent PostgreSQL administrator recovery connection.
+- [ ] Back up PostgreSQL configuration/HBA files, included-file inventory,
+  permissions, service identity, and hashes to the approved restricted vault.
+- [ ] Take the custom-format `nukhabapay_dev` backup and non-secret globals
+  backup. Record archive hashes and restore the database to a new, empty,
+  isolated rehearsal target. A successful archive listing alone is not
+  acceptance.
+- [ ] On the restore, verify catalogue row digests/counts, object definitions,
+  owners, ACLs, schema/default ACLs, sequences, migration history, and
+  catalogue regression behavior. Rehearse the reviewed 004–006 source
+  transition there in one transaction; verify rollback and postchecks. Do not
+  restore over or rename the live target.
+
+### Stage B — SCRAM and restricted role authentication (DBA; separately approved)
+
+- [ ] Confirm deployed PostgreSQL/client compatibility and review every ordered
+  HBA rule and include. Set SCRAM password encryption for the approved
+  password-setting session, rotate each project role to a distinct
+  secret-manager-delivered credential, and install exact database/role
+  loopback SCRAM rules before broader rules. Review IPv6 separately.
+- [ ] Verify role attributes, memberships, owners, connection limits, timeouts,
+  and secret custody. Application roles must not be superuser, createdb,
+  createrole, inherit, bypass-RLS, owners, or members of other roles.
+- [ ] Validate HBA syntax/order and fresh connections. Run the sanitized
+  per-role matrix from the operator review: own credential succeeds only where
+  approved; wrong and another role's credentials fail with `28P01`; no
+  password never succeeds; remote/IPv6 paths match separately approved policy.
+  Keep the recovery connection open throughout.
+- [ ] Run the connection-free migration-source verification and then the
+  exact-target **read-only** persistent preflight with current approval,
+  database OID/system identifier, manifest confirmation, and SCRAM attestation.
+  Require its wrong-password probe to observe `28P01`. Preflight is not
+  migration authorization.
+
+### Stage C — persistent IAM migration (separate explicit execution approval)
+
+- [ ] Reconfirm quiescence, backup hash, restore acceptance, target identity,
+  source hashes, exact 001–003 history, role/ACL/default-ACL baseline, and no
+  unexpected connections or prepared transactions immediately before apply.
+- [ ] Obtain separate written approval for the exact persistent migration
+  transaction. Use only the reviewed activation source, as
+  `nukhabapay_migrator`, on the approved target. Acquire the migration advisory
+  lock, run the preflight on that same connection, and apply 004, 005, and 006
+  in order in one transaction. No application, session, IAM, importer, or
+  administrator runtime role may execute migrations.
+- [ ] If any assertion fails or commit acknowledgement is uncertain, stop.
+  Inspect authoritative history/state read-only; never retry blindly or run
+  migration down.
+- [ ] After a successful commit, obtain separate approval for the narrow IAM
+  CONNECT/USAGE grants. Review effective database, schema, table, column,
+  sequence, function, PUBLIC, and inherited privileges. Keep the importer
+  decision separate.
+- [ ] Approve/provision a distinct persistent session login and its reviewed
+  persistent grant recipe only after verifying exactly 27 SELECT and 23 INSERT
+  column grants, no table-wide or mutation rights, no IAM/catalogue/workflow
+  access, and no unsafe role attributes or memberships. The disposable grant
+  script is not valid for this target.
+
+### Stage D — IAM, tenant binding, session, and audit acceptance
+
+- [ ] Verify migration history is exactly 001–006; expected tables, constraints,
+  triggers, owners, RLS/FORCE RLS and exact ACLs are present; catalogue data and
+  existing object ACLs match the approved baseline.
+- [ ] Create only a separately approved, non-privileged development test
+  identity using the exact issuer/subject. Verify unknown/disabled staff,
+  inactive membership, wrong tenant, cross-tenant access, and missing
+  `staff.self.read` all deny. Tenant UUID is selected only by trusted server
+  composition; verify membership/foreign-key ownership against the canonical
+  tenant table.
+- [ ] Using synthetic identities, prove session creation, hash-only persistence,
+  rotation, expiry, logout/revocation, cold-process behavior, authority-change
+  invalidation, and audit atomicity. Inject unavailable IAM, session, and audit
+  dependencies and verify no credential or success-shaped response is issued.
+  Verify retention, capacity, alerting, restart, backup, and recovery ownership.
+- [ ] Keep all application processes stopped until every post-migration
+  privilege, tenant, audit, session, and catalogue check passes.
+
+### Stage E — secure runtime composition and Auth0 development configuration
+
+- [ ] Review the server-only runtime configuration contract and implementation.
+  The default is disabled; absent/partial settings reject; client secret and
+  database URLs are injected through approved process-only secret delivery,
+  redacted from inspection/logs, and never bundled into browser assets.
+- [ ] Compose only the reviewed IAM reader/audit writer, server-selected tenant,
+  exact Auth0 issuer allowlist, persistent session store, and Auth0 BFF. Run
+  startup readiness checks against the exact approved target and expected
+  database/cluster identity. A failed readiness check prevents listener/login
+  startup.
+- [ ] Configure the Auth0 **development** application with exact callback and
+  logout allowlists, confidential client credentials, exact API audience and
+  signed human-principal claim. Verify RS256 token profiles and emission,
+  MFA-factor semantics, `amr=mfa`, and fresh `auth_time`; retain no refresh
+  token. Never use wildcard callbacks or dynamic tenant/return URLs.
+- [ ] Confirm browser-trusted HTTPS, exact listener origin, rate limits,
+  monitoring, log redaction, and incident/recovery contacts. No secret is
+  supplied in this plan or repository.
+
+### Stage F — controlled OIDC/MFA integration test and activation decision
+
+- [ ] Obtain separate approval for a bounded Auth0 development integration
+  window. Use a non-privileged synthetic development identity pre-enrolled to
+  the exact issuer/subject and exact tenant. Do not use production staff or
+  privileged roles.
+- [ ] Test successful login/callback and logout against the approved development
+  tenant, plus issuer/audience/signature, state/nonce/PKCE, expiry/replay,
+  missing/stale MFA, unknown/disabled identity, wrong tenant, CSRF, session
+  rotation/revocation, audit/session persistence failure, and browser/server
+  import-boundary rejection. Verify no token or secret reaches the browser,
+  logs, or persistent session rows.
+- [ ] Stop and return to disabled mode on any mismatch. Record sanitized
+  evidence, hashes, exact tested configuration versions, and approvals. A
+  separate owner decision is required to enable even controlled development
+  login; this checklist itself never enables it.
+
+## Current code-level blockers
+
+| Area | Existing fail-closed boundary | Required reviewed change before activation |
+| --- | --- | --- |
+| Migration execution | `scripts/rehearse-reviewed-migrations.mjs` accepts only generated disposable targets; `scripts/prepare-persistent-iam-activation.mjs` only prepares a report and has no apply mode. | New immutable, approval-bound persistent source transition and transaction wrapper; do not weaken the existing runner. |
+| Migration SQL | 004 default-ACL preflight rejects the development database; 005 and the 006 SQL sidecar require generated disposable names. 004–006 are registered/frozen, not persistent-target ready. | Preserve all frozen bytes/hashes; review/register a new transition and repeat disposable plus restored-backup acceptance. |
+| IAM grants | 004 supplies IAM projections but not development database CONNECT; IAM reader/writer currently lack the enclosing CONNECT/USAGE grants. Proposed IAM grant SQL is not registered or authorized. | Separately approved exact IAM CONNECT/USAGE grants and effective-rights verification. |
+| Session grants/store | `grant_staff_session_backend.sql` and `createStaffSessionStore` accept only an ephemeral role/database. No persistent session-role grant recipe exists; the store does not bind startup to the parser's expected OID/system identifier. | New persistent-target adapter and least-privilege grant recipe, with independent identity/privilege checks and disposable tests. |
+| Runtime composition | `apps/admin-web/src/main.ts` rejects every session mode except `disabled`; it constructs neither IAM actors nor session persistence nor `Auth0Login`. The persistent session parser is not registered in runtime DI. | Reviewed server-only composition/readiness gates; keep default disabled and fail startup on any dependency/configuration failure. |
+| Auth0 configuration | A server-only pending development Auth0 parser exists, but the CLI does not call it or select a secret/session adapter. `Auth0Login` remains trusted-composition/test-only. No live tenant claims/MFA behavior has been verified. | Exact server-only config contract, allowlists, provider claim/MFA verification, and separately approved synthetic-identity integration test. |
+| Dashboard | React sign-in follows explicit BFF availability; default CLI composition advertises unavailable. A fresh minimal self profile is required for the self-only authenticated view. | Enable only after the runtime and all operational gates pass; no browser-side Auth0 client or token handling. |
+| Operations | Current loopback PostgreSQL auth is documented as `trust`; backup/restore, SCRAM, target approvals, retention/HA/recovery and named operational ownership remain unresolved. | Complete and record Stages A–F in this checklist; no code flag substitutes for operational evidence or explicit approval. |
+
+Existing synthetic negative coverage is in `apps/admin-web/test/auth0.spec.ts`,
+`apps/admin-web/test/portal.spec.ts`, `packages/application/test/staff-session.test.ts`,
+`packages/database/test/staff-session-runtime-config.spec.ts`,
+`apps/api/test/identity-guards.spec.ts`, and
+`apps/api/test/staff-sessions.integration.ts`. It covers incomplete/disabled
+startup, invalid MFA and token profiles, unavailable audit/session persistence,
+unknown or inactive identities, tenant mismatch, rotation/revocation, CSRF, and
+browser/server boundaries. PostgreSQL integration tests require an explicitly
+configured disposable admin and PostgreSQL 17 test binaries; they must not fall
+back to the development database.
+
 ## Controlled deployment procedure
 
 ### Gate 0 — approvals and implementation
@@ -148,7 +328,7 @@ Before scheduling migration, approve:
 
 The resulting implementation must first pass the complete 001–006 suite on (a) a fresh disposable target and (b) a fresh restore of the actual pre-migration development backup. Persistent execution remains NO-GO until both pass.
 
-### Gate 1 — read-only preflight
+### Gate 1 — read-only baseline and source preflight
 
 1. Freeze catalogue imports and stop API/BFF/worker processes that can connect to the target.
 2. Verify PostgreSQL server/client major compatibility and the literal target host, port, database, current user and database owner.
@@ -158,11 +338,11 @@ The resulting implementation must first pass the complete 001–006 suite on (a)
 6. Verify database/schema ACLs and default ACLs match the reviewed baseline. At inspection time only the migrator/runtime could connect, only migrator/runtime had schema access, and owner-created tables defaulted SELECT to catalogue runtime/importer. Treat the absent importer/IAM enclosing privileges as unresolved, not as permission to grant broadly.
 7. Verify no unexpected connections, prepared transactions, logical slots, uncommitted migration or idle-in-transaction sessions.
 8. Run `pnpm.cmd db:verify:sources` and independently record 004/005/006/manifest hashes.
-9. Inject the process-only approved preflight values, including the exact target OID/system identifier, approval ID, reviewed HBA attestation and confirmation `PREFLIGHT_ONLY:nukhabapay_dev:<current-manifest-sha256>`. Run `pnpm.cmd db:preflight:persistent-development`. Never place these values or the URL in a script, log, chat or checkpoint. The current `pnpm.cmd db:migrate` is not the persistent profile and must not be run against development.
+9. Record the baseline and source evidence. Do not edit authentication or apply migrations during this gate.
 
 Any mismatch is a stop condition. Do not auto-correct ACLs, terminate unrelated connections or proceed with a partial migration.
 
-### Gate 2 — backup and restore rehearsal
+### Gate 2 — backup, restore, SCRAM, and final read-only preflight
 
 With approved secret delivery outside command arguments, create a custom-format database archive using the PostgreSQL 17 `pg_dump` binary:
 
@@ -185,6 +365,20 @@ pg_restore.exe --host 127.0.0.1 --port 5432 --username <approved-restore-role> -
 ```
 
 Validate counts, history, owners, ACLs and catalogue behavior on the restore before rehearsing 004–006 there. Never use `--clean` against the existing database, never restore over a non-empty target, and never treat the globals file as an automatically executable role-replacement script. PostgreSQL documents custom archives as suitable for `pg_restore`; `--single-transaction` makes a restore all-or-nothing and implies exit-on-error. `pg_dumpall --globals-only --no-role-passwords` captures global definitions without role passwords.
+
+Only after the backup has been restored and accepted may the separately
+authorized DBA change HBA/password settings and provision/rotate restricted
+role credentials, following Stage B of the dependency-ordered checklist and the
+operator review. Validate fresh connections and the complete authentication
+matrix before continuing. Then inject the process-only approved preflight
+values, including exact target OID/system identifier, approval ID, reviewed HBA
+attestation and
+`PREFLIGHT_ONLY:nukhabapay_dev:<current-manifest-sha256>`. Run
+`pnpm.cmd db:preflight:persistent-development` and require its wrong-password
+probe to observe SQLSTATE `28P01`. Never put these values or the database URL in
+a script, log, chat, or checkpoint. This read-only preflight is not migration
+authorization; `pnpm.cmd db:migrate` is not the persistent profile and must not
+be run against development.
 
 ### Gate 3 — migration window
 

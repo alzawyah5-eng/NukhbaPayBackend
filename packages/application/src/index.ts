@@ -82,3 +82,12 @@ export type {
   SecurityAuditTarget,
   SecurityAuditWriter,
 } from "./identity/security-audit.js";
+
+export { prepareSyntheticPriceSubmission, consumeSubmissionEvidence, submissionDigest, SUBMISSION_CANONICALIZATION, PUBLICATION_PERMISSION_CONTRACTS } from "./catalog/submission-evidence.js";
+export type { SubmissionEvidence } from "./catalog/submission-evidence.js";
+
+export { prepareSyntheticPublicationCommand, consumePublicationCommand, independentlyVerifyPublicationPayload } from "./catalog/publication-workflow.js";
+export type { PublicationAction, PublicationCommand, PublicationCommandTicket, SyntheticPublicationAuthority, SyntheticPublicationPermission } from "./catalog/publication-workflow.js";
+
+export { PublishedCatalogueService, CatalogueAccessError, attestCatalogueClient, consumeCatalogueReadTicket, CATALOGUE_AUDIENCES, CATALOGUE_SCOPES } from "./catalog/published-catalogue.js";
+export type { CatalogueClientKind, CatalogueClientIdentity, CatalogueClientBinding, CatalogueBindingRepository, CatalogueRow, CatalogueReadTicket, CatalogueReader, CatalogueReadAudit, CatalogueAuditWriter, PublicCatalogueProduct, PublishedCataloguePage } from "./catalog/published-catalogue.js";

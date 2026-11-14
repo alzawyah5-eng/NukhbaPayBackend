@@ -43,6 +43,8 @@ test('CLI and default BFF cannot activate Auth0, create sessions, accept actor J
   const app=await createStaffPortal({pfx,certificate,passphrase,port:0});
   try{
     assert.equal((await call(app.origin,'/auth/session')).status,503);
+    assert.deepEqual(JSON.parse((await call(app.origin,'/auth/config')).body),{loginPath:null});
+    assert.equal((await call(app.origin,'/auth/me')).status,503);
     for(const path of ['/auth/login','/auth/callback','/auth/access-token','/auth/create','/auth/session?actor=forged','/AUTH/SESSION','/auth/session/','/.env','/src/main.ts','/dist/main.js','/../../packages/database'])assert.equal((await call(app.origin,path)).status,404);
     assert.equal((await call(app.origin,'/auth/session','POST',{'content-type':'application/json'},'{"actor":"forged"}')).status,404);
     assert.equal((await call(app.origin,'/auth/logout','GET')).status,404);
@@ -101,6 +103,14 @@ test('mock Auth0 browser round trip admits only the exact callback; logout revok
     const session=callback.headers['set-cookie']!.find(v=>v.startsWith('__Host-nukhbapay_staff='))!;
     assert.match(session,/Secure; HttpOnly; SameSite=Strict/);
     const raw=session.split(';')[0]!,status=await call(origin,'/auth/session','GET',{cookie:raw});assert.equal(status.status,200);
+    assert.deepEqual(JSON.parse((await call(origin,'/auth/config')).body),{loginPath:'/auth/login'});
+    assert.equal((await call(origin,'/auth/me')).status,401);
+    const self=await call(origin,'/auth/me','GET',{cookie:raw});assert.equal(self.status,200);
+    const projection=JSON.parse(self.body);
+    assert.deepEqual(Object.keys(projection).sort(),['expiresAtMs','navigation','staffId','tenantId']);
+    assert.deepEqual(projection.navigation,['/overview']);
+    assert.equal((await call(origin,'/auth/me?tenant=forged','GET',{cookie:raw})).status,404);
+    assert.equal((await call(origin,'/auth/me','GET',{cookie:raw,origin:'https://attacker.invalid'})).status,403);
     const replay=await call(origin,path,'GET',{cookie,'sec-fetch-site':'cross-site'});assert.equal(replay.status,401);
     assert.deepEqual(JSON.parse(replay.body),{error:'Staff authentication failed'});
     const pending=await call(origin,'/auth/login','GET',{cookie:raw});assert.equal(pending.status,303);

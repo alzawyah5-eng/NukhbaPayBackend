@@ -1,5 +1,7 @@
 # Track B: Auth0 browser login source contract
 
+2026-11-14 integration update: see [synthetic BFF/dashboard acceptance and existing-application configuration](../runbooks/staff-auth0-synthetic-integration.md). The React sign-in control now follows explicit BFF availability, and authenticated self-only navigation requires a freshly validated minimal profile. Default CLI real login and persistent sessions remain disabled; the database source-profile review remains NO-GO. No existing Auth0 tenant/application is recreated or activated.
+
 13 November 2026, Asia/Dubai. The BFF login flow is implemented for review. `src/main.ts` still rejects every session mode except `disabled` and constructs neither `Auth0Login` nor session/identity adapters. No Auth0 tenant, employee, persistent IAM deployment, PostgreSQL authentication, migration, certificate trust entry, dashboard or privileged operation was changed or activated.
 
 ## Composition and configuration

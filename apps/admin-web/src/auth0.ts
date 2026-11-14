@@ -24,7 +24,7 @@ export interface Auth0Configuration {
   readonly tenantId: string;
 }
 
-function configuration(input: Auth0Configuration): Readonly<Auth0Configuration> {
+export function validateAuth0Configuration(input: Auth0Configuration): Readonly<Auth0Configuration> {
   try {
     const issuer = new URL(input.issuer), callback = new URL(input.callbackUrl), claim = new URL(input.staffKindClaim), audience = new URL(input.audience);
     if (issuer.protocol !== "https:" || issuer.href !== input.issuer || issuer.pathname !== "/" || issuer.search || issuer.hash ||
@@ -36,7 +36,9 @@ function configuration(input: Auth0Configuration): Readonly<Auth0Configuration> 
         !["https:", "urn:"].includes(audience.protocol) || audience.username || audience.password || audience.search || audience.hash ||
         claim.protocol !== "https:" || claim.href !== input.staffKindClaim || claim.pathname === "/" || claim.search || claim.hash || claim.username || claim.password ||
         !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(input.tenantId)) throw fail();
-    return Object.freeze({ ...input });
+    const value={...input,clientSecret:input.clientSecret};
+    Object.defineProperty(value,'clientSecret',{value:input.clientSecret,enumerable:false,writable:false});
+    return Object.freeze(value);
   } catch { throw fail(); }
 }
 
@@ -100,7 +102,7 @@ export class Auth0Login {
     readonly sessions: Pick<StaffSessionLifecycle, "create" | "rotate" | "revoke">;
     readonly fetch?: typeof fetch; readonly now?: () => Date;
   }) {
-    this.#config = configuration(config);
+    this.#config = validateAuth0Configuration(config);
     this.#fetch = dependencies.fetch ?? globalThis.fetch;
     this.#now = dependencies.now ?? (() => new Date());
     this.#actors = dependencies.actors; this.#sessions = dependencies.sessions;
