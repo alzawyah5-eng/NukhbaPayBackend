@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
-import { assertGeneratedDraftPublicationCandidate } from "@nukhbapay/application";
+import { consumeSubmissionEvidence, submissionDigest, assertGeneratedDraftPublicationCandidate } from "@nukhbapay/application";
 
 export class PublicationDraftConflictError extends Error { override readonly name="PublicationDraftConflictError"; }
 export class PublicationDraftStaleError extends Error { override readonly name="PublicationDraftStaleError"; }
@@ -65,7 +65,7 @@ export async function createCataloguePublicationDraftStore(input:PublicationDraf
   } catch(error) {initializationError=error;} finally {probe.release();}
   if(initializationError!==undefined){await pool.end();throw initializationError;}
 
-  async function save(value:unknown):Promise<PublicationDraftReceipt>{
+  async function save(value:unknown, submission?:ReturnType<typeof consumeSubmissionEvidence>):Promise<PublicationDraftReceipt>{
     const candidate=assertGeneratedDraftPublicationCandidate(value),client=await pool.connect();
     try {
       // The tenant/product advisory lock is the serialization boundary. READ
@@ -75,17 +75,35 @@ export async function createCataloguePublicationDraftStore(input:PublicationDraf
       await client.query("SELECT set_config('nukhabapay.publication_tenant_id',$1,true)",[candidate.tenantId]);
       await client.query("SELECT set_config('nukhabapay.tenant_id',$1,true)",[candidate.tenantId]);
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))",[`${candidate.tenantId}:${candidate.productId}`]);
+      if(submission){
+        const rights=(await client.query(`SELECT
+          (SELECT count(*)::int FROM pg_class WHERE relnamespace='nukhabapay'::regnamespace AND relname IN
+            ('price_submission_births','price_submission_evidence','price_submission_events') AND relrowsecurity AND relforcerowsecurity) AS forced,
+          bool_and(has_table_privilege(current_user,format('nukhabapay.%I',n),'SELECT') AND has_table_privilege(current_user,format('nukhabapay.%I',n),'INSERT')) AS required,
+          bool_or(has_table_privilege(current_user,format('nukhabapay.%I',n),'UPDATE') OR
+            has_table_privilege(current_user,format('nukhabapay.%I',n),'DELETE') OR has_table_privilege(current_user,format('nukhabapay.%I',n),'TRUNCATE')) AS excess,
+          has_any_column_privilege(current_user,'nukhabapay.price_submission_births','INSERT,UPDATE,SELECT') AS births
+          FROM unnest(ARRAY['price_submission_evidence','price_submission_events']) n`)).rows[0];
+        if(rights.forced!==3||!rights.required||rights.excess||rights.births)throw new Error("Submission store unavailable");
+      }
+      if(submission && (!await submission.revalidate() || submission.tenantId!==candidate.tenantId ||
+        submissionDigest(submission.canonicalPayload)!==candidate.candidateDigest))throw new Error("Submission denied");
       const existingRequest=await client.query<{candidate_id:string,candidate_digest:string,price_version:string}>(
         `SELECT r.candidate_id,r.candidate_digest,c.price_version::text FROM nukhabapay.catalogue_publication_requests r
          JOIN nukhabapay.catalogue_publication_candidates c ON c.candidate_id=r.candidate_id
          WHERE r.tenant_id=$1 AND r.product_id=$2 AND r.idempotency_key=$3`,[candidate.tenantId,candidate.productId,candidate.idempotencyKey]);
       if(existingRequest.rowCount){
         const row=existingRequest.rows[0]!;if(row.candidate_digest!==candidate.candidateDigest)throw new PublicationDraftConflictError("Idempotency key payload conflict");
+        if(submission){
+          const proof=await client.query("SELECT creator_staff_id FROM nukhabapay.price_submission_evidence WHERE candidate_id=$1 AND tenant_id=$2",[candidate.candidateId,candidate.tenantId]);
+          if(!await submission.revalidate() || proof.rows[0]?.creator_staff_id!==submission.creatorStaffId)throw new Error("Legacy or differently attributed draft");
+        }
         await client.query("COMMIT");return Object.freeze({candidateId:row.candidate_id,priceVersion:Number(row.price_version),outcome:"REPLAYED",execution:"NOT_AUTHORIZED"});
       }
       const existingCandidate=await client.query<{candidate_id:string,price_version:string}>(
         `SELECT candidate_id,price_version::text FROM nukhabapay.catalogue_publication_candidates WHERE candidate_digest=$1`,[candidate.candidateDigest]);
       if(existingCandidate.rowCount){
+        if(submission)throw new Error("Existing candidate cannot acquire submission evidence");
         const row=existingCandidate.rows[0]!;
         await client.query(`INSERT INTO nukhabapay.catalogue_publication_requests(operation_id,tenant_id,product_id,idempotency_key,candidate_id,candidate_digest,outcome)
           VALUES($1,$2,$3,$4,$5,$6,'DRAFT_REPLAYED')`,[candidate.operationId,candidate.tenantId,candidate.productId,candidate.idempotencyKey,row.candidate_id,candidate.candidateDigest]);
@@ -132,8 +150,18 @@ export async function createCataloguePublicationDraftStore(input:PublicationDraf
       await client.query(`INSERT INTO nukhabapay.catalogue_publication_events(event_id,operation_id,candidate_id,tenant_id,product_id,price_version,candidate_digest,
         event_name,occurred_at) VALUES($1,$2,$3,$4,$5,$6,$7,'CATALOGUE_PUBLICATION_CANDIDATE_CREATED',$8)`,
         [randomUUID(),candidate.operationId,candidate.candidateId,candidate.tenantId,candidate.productId,candidate.priceVersion,candidate.candidateDigest,candidate.evaluatedAt]);
+      if(submission){
+        await client.query(`INSERT INTO nukhabapay.price_submission_evidence(candidate_id,tenant_id,product_id,creation_xid,canonical_payload,
+          creator_staff_id,issuer,subject,authz_version,membership_version,submitted_at)
+          VALUES($1,$2,$3,txid_current(),$4,$5,$6,$7,$8,$9,$10)`,
+          [candidate.candidateId,candidate.tenantId,candidate.productId,submission.canonicalPayload,submission.creatorStaffId,
+            submission.issuer,submission.subject,submission.authzVersion,submission.membershipVersion,submission.submittedAt]);
+        await client.query(`INSERT INTO nukhabapay.price_submission_events(candidate_id,tenant_id,product_id,creator_staff_id,occurred_at)
+          VALUES($1,$2,$3,$4,$5)`,[candidate.candidateId,candidate.tenantId,candidate.productId,submission.creatorStaffId,submission.submittedAt]);
+        if(!await submission.revalidate())throw new Error("Stale submission authority");
+      }
       await client.query("COMMIT");return Object.freeze({candidateId:candidate.candidateId,priceVersion:candidate.priceVersion,outcome:"CREATED",execution:"NOT_AUTHORIZED"});
     } catch(error) {await client.query("ROLLBACK").catch(()=>undefined);throw error;} finally {client.release();}
   }
-  return Object.freeze({save,close:async()=>pool.end()});
+  return Object.freeze({save: (value:unknown)=>save(value),submit:async(value:unknown)=>{const proof=consumeSubmissionEvidence(value);return save(proof.candidate,proof);},close:async()=>pool.end()});
 }

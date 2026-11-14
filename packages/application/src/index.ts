@@ -82,3 +82,6 @@ export type {
   SecurityAuditTarget,
   SecurityAuditWriter,
 } from "./identity/security-audit.js";
+
+export { prepareSyntheticPriceSubmission, consumeSubmissionEvidence, submissionDigest, SUBMISSION_CANONICALIZATION, PUBLICATION_PERMISSION_CONTRACTS } from "./catalog/submission-evidence.js";
+export type { SubmissionEvidence } from "./catalog/submission-evidence.js";

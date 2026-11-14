@@ -4,9 +4,10 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { generateDraftPublicationCandidate, type DraftPublicationRequest } from "@nukhbapay/application";
+import { prepareSyntheticPriceSubmission, submissionDigest, generateDraftPublicationCandidate, type DraftPublicationRequest } from "@nukhbapay/application";
 import { createCataloguePublicationDraftStore, PublicationDraftConflictError, PublicationDraftStaleError } from "@nukhbapay/database";
 import { Client } from "pg";
+import { attestVerifiedStaffIdentity } from "@nukhbapay/application/verified-identity";
 import { forDatabase, withDisposableIamDatabase } from "./fixtures/disposable-iam-database.js";
 
 const root=fileURLToPath(new URL("../../../../",import.meta.url));
@@ -55,6 +56,10 @@ test("proposed 007 provides atomic, immutable, tenant-scoped draft publication e
       catch(error){await owner.query("ROLLBACK");throw error;}
       assert.deepEqual((await owner.query("SELECT name FROM nukhabapay.schema_migrations ORDER BY id")).rows.map(row=>row.name),expectedHistory);
 
+      await owner.query("BEGIN");
+      try {await owner.query("SELECT set_config('nukhbapay.submission_migration','BRICK_4B_FOUNDATION_SYNTHETIC',true)");
+        await owner.query(readFileSync(path.join(databaseRoot,"pending-migrations/008_price_submission_evidence.sql"),"utf8"));await owner.query("COMMIT");}
+      catch(error){await owner.query("ROLLBACK");throw error;}
       const tenantId=randomUUID(),otherTenantId=randomUUID(),productId=randomUUID(),accountId=randomUUID(),snapshotId=randomUUID(),mappingId=randomUUID(),offerRowId=randomUUID();
       await owner.query("INSERT INTO nukhabapay.tenants(id,tenant_key) VALUES($1,'publication-tenant'),($2,'other-publication-tenant')",[tenantId,otherTenantId]);
       await owner.query(`INSERT INTO nukhabapay.products(id,canonical_product_key,brand,redemption_country,currency,face_value_minor,fulfillment_method,terms_version)
@@ -71,7 +76,7 @@ test("proposed 007 provides atomic, immutable, tenant-scoped draft publication e
 
       await fixture.fixtureClient.query(`CREATE ROLE ${identifier(writerRole)} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS`);
       await owner.query("BEGIN");
-      try {await owner.query("SELECT set_config('nukhabapay.publication_writer_role',$1,true)",[writerRole]);await owner.query(grantSql);await owner.query("COMMIT");}
+      try {await owner.query("SELECT set_config('nukhabapay.publication_writer_role',$1,true)",[writerRole]);await owner.query(grantSql);await owner.query(readFileSync(path.join(databaseRoot,"roles/grant_price_submission_writer.sql"),"utf8"));await owner.query("COMMIT");}
       catch(error){await owner.query("ROLLBACK");throw error;}
       const writerUrl=new URL(forDatabase(process.env["DB_TEST_ADMIN_URL"]!,fixture.databaseName));writerUrl.username=writerRole;writerUrl.password=randomUUID();
       store=await createCataloguePublicationDraftStore({connectionString:writerUrl.href,expectedRole:writerRole,expectedDatabase:fixture.databaseName,poolMax:2});
@@ -137,6 +142,54 @@ test("proposed 007 provides atomic, immutable, tenant-scoped draft publication e
         await writer!.query("BEGIN");try {await writer!.query("SELECT set_config('nukhabapay.publication_tenant_id',$1,true)",[tenantId]);assert.equal((await writer!.query("SELECT count(*)::int AS n FROM nukhabapay.catalogue_publication_candidates")).rows[0].n,2);}finally{await writer!.query("ROLLBACK");}
         await writer!.query("BEGIN");try {await writer!.query("SELECT set_config('nukhabapay.publication_tenant_id',$1,true)",[otherTenantId]);assert.equal((await writer!.query("SELECT count(*)::int AS n FROM nukhabapay.catalogue_publication_candidates")).rows[0].n,0);}finally{await writer!.query("ROLLBACK");}
         const replay=await store!.save(candidate);assert.equal(replay.outcome,"REPLAYED");
+      });
+      await t.test("008 submission attribution, canonical evidence, legacy denial and atomic audit",async()=>{
+        const staffId=randomUUID(),now=()=>new Date("2026-11-09T10:00:00Z");
+        const identity=attestVerifiedStaffIdentity({issuer:"https://staff.invalid/",subject:"creator-1",security:{audience:"test",clientId:"test",
+          profile:"rfc9068-staff-v1",principalKind:"human",issuedAt:Date.parse("2026-11-09T09:00:00Z")/1000,expiresAt:Date.parse("2026-11-09T11:00:00Z")/1000,assurance:"not-established"}});
+        let auditFailure=false,allowed=true;
+        const deps={capability:"ISOLATED_SYNTHETIC_SUBMISSION_ONLY" as const,now,auditWriter:{appendSecurityAuditEvents:async()=>{if(auditFailure)throw new Error("audit down");}},
+          repository:{findByTrustedIdentity:async()=>({staffId,staffStatus:"ACTIVE" as const,identityStatus:"ACTIVE" as const,authzVersion:1n,tokensValidAfter:null}),
+            findPlatformRoleGrants:async()=>[],findTenantMembership:async()=>({membershipId:randomUUID(),tenantId:allowed?tenantId:otherTenantId,status:"ACTIVE" as const,version:1n,
+              roleGrants:[{roleCode:"PRICING_EDITOR",scope:"TENANT" as const,grantedAt:"2026-11-01T00:00:00Z",expiresAt:null,revokedAt:null}]})}};
+        // Stable membership identity is part of freshness evidence.
+        const membershipId=randomUUID();const membershipLookup=deps.repository.findTenantMembership;
+        deps.repository.findTenantMembership=async()=>({...await membershipLookup(),membershipId});
+        const freshRequest={...request,expectedPreviousVersion:2,idempotencyKey:randomUUID(),pricingPolicy:{...policy,version:"evidenced-v3"}};
+        await assert.rejects(()=>store!.submit({...candidate}),/Untrusted/);
+        await assert.rejects(()=>prepareSyntheticPriceSubmission(deps,{...identity},freshRequest),/denied/);
+        allowed=false;await assert.rejects(()=>prepareSyntheticPriceSubmission(deps,identity,freshRequest),/denied/);allowed=true;
+        auditFailure=true;await assert.rejects(()=>prepareSyntheticPriceSubmission(deps,identity,freshRequest),/audit down/);auditFailure=false;
+        const legacy=await prepareSyntheticPriceSubmission(deps,identity,request);
+        await assert.rejects(()=>store!.submit(legacy),/Legacy/);
+        const rawInsert=async(payload:string|null)=>{
+          await writer!.query("BEGIN");try{
+            await writer!.query("SELECT set_config('nukhabapay.publication_tenant_id',$1,true)",[tenantId]);
+            await writer!.query(`INSERT INTO nukhabapay.price_submission_evidence(candidate_id,tenant_id,product_id,creation_xid,canonical_payload,
+              creator_staff_id,issuer,subject,authz_version,membership_version,submitted_at)
+              VALUES($1,$2,$3,txid_current(),$4,$5,'https://staff.invalid/','creator-1',1,1,$6)`,
+              [candidate.candidateId,tenantId,productId,payload,staffId,now().toISOString()]);
+          }finally{await writer!.query("ROLLBACK");}
+        };
+        await assert.rejects(()=>rawInsert(null),{code:"23502"});
+        await assert.rejects(()=>rawInsert(legacy.canonicalPayload+" "),{code:"23514"});
+        await assert.rejects(()=>rawInsert(legacy.canonicalPayload),{code:"23503"});
+        const proof=await prepareSyntheticPriceSubmission(deps,identity,freshRequest);
+        assert.equal(proof.creatorStaffId,staffId);assert.equal(submissionDigest(proof.canonicalPayload),proof.candidate.candidateDigest);
+        assert.notEqual(submissionDigest(proof.canonicalPayload+" "),proof.candidate.candidateDigest);
+        await owner.query(`CREATE TRIGGER reject_submission_audit BEFORE INSERT ON nukhabapay.price_submission_events FOR EACH ROW EXECUTE FUNCTION nukhabapay.reject_publication_evidence_mutation()`);
+        await assert.rejects(()=>store!.submit(proof),{code:"42501"});
+        assert.equal((await fixture.fixtureClient.query("SELECT count(*)::int AS n FROM nukhabapay.price_submission_evidence")).rows[0].n,0);
+        await owner.query("DROP TRIGGER reject_submission_audit ON nukhabapay.price_submission_events");
+        const results=await Promise.all([1,2].map(async()=>store!.submit(await prepareSyntheticPriceSubmission(deps,identity,freshRequest))));
+        assert.equal(results.filter(r=>r.outcome==="CREATED").length,1);
+        assert.equal(results.filter(r=>r.outcome==="REPLAYED").length,1);
+        const row=(await fixture.fixtureClient.query("SELECT * FROM nukhabapay.price_submission_evidence")).rows[0];
+        assert.equal(row.creator_staff_id,staffId);assert.equal(submissionDigest(row.canonical_payload),row.candidate_id);
+        await assert.rejects(()=>fixture.fixtureClient.query("UPDATE nukhabapay.price_submission_evidence SET subject='tampered'"),{code:"42501"});
+        await writer!.query("BEGIN");try{await writer!.query("SELECT set_config('nukhabapay.publication_tenant_id',$1,true)",[otherTenantId]);
+          assert.equal((await writer!.query("SELECT count(*)::int AS n FROM nukhabapay.price_submission_evidence")).rows[0].n,0);
+        }finally{await writer!.query("ROLLBACK");}
       });
     } finally {
       await writer?.end().catch(()=>undefined);await store?.close().catch(()=>undefined);await owner.end().catch(()=>undefined);

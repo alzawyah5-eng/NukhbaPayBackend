@@ -7,6 +7,12 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const DIGEST = /^[0-9a-f]{64}$/;
 const TEXT = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 const generatedCandidates = new WeakSet<object>();
+const canonicalEvidence = new WeakMap<object, string>();
+/** Only a generated object can reveal its original canonical hashing bytes. */
+export function generatedCandidateCanonicalEvidence(value: unknown): string {
+  assertGeneratedDraftPublicationCandidate(value);
+  return canonicalEvidence.get(value as object)!;
+}
 
 export interface PublicationSourceSnapshot {
   readonly snapshotId: string;
@@ -176,5 +182,6 @@ export function generateDraftPublicationCandidate(request: DraftPublicationReque
     priceVersion,candidateDigest,execution:"NOT_AUTHORIZED" as const});
   const result=Object.freeze({...candidate,audit});
   generatedCandidates.add(result);
+  canonicalEvidence.set(result, JSON.stringify(canonical));
   return result;
 }

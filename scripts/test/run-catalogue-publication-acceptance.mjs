@@ -17,7 +17,10 @@ Object.assign(env,{DB_RUNTIME_ROLE:"nukhabapay_runtime",DB_IMPORT_ROLE:"nukhabap
 const postgresBin=path.join(process.env.USERPROFILE??"","PostgreSQL","pgsql","bin");
 if(existsSync(path.join(postgresBin,"pg_dump.exe"))&&existsSync(path.join(postgresBin,"pg_restore.exe")))env.NUKHBAPAY_PG_TEST_BIN=postgresBin;
 async function persistentEvidence(){
-  const client=new Client({connectionString:env.DB_MIGRATION_URL,connectionTimeoutMillis:3000});await client.connect();
+  const client=new Client({connectionString:env.DB_MIGRATION_URL,connectionTimeoutMillis:3000});
+  const target=new URL(env.DB_MIGRATION_URL),started=Date.now();
+  console.info("Read-only baseline target",target.hostname,target.port,target.pathname,target.username);
+  await client.connect();console.info("Read-only baseline connected in",Date.now()-started,"ms");
   try {await client.query("BEGIN READ ONLY");const history=(await client.query("SELECT name FROM nukhabapay.schema_migrations ORDER BY id")).rows.map(row=>row.name);
     const databases=(await client.query("SELECT datname FROM pg_database ORDER BY datname")).rows.map(row=>row.datname);
     const generatedRoles=(await client.query("SELECT rolname FROM pg_roles WHERE rolname ~ '^nukh_(publication|hostile)_[0-9a-f]{20}$' ORDER BY rolname")).rows.map(row=>row.rolname);
@@ -25,6 +28,7 @@ async function persistentEvidence(){
     await client.query("COMMIT");return {history,databases,generatedRoles,disposableConnections};}
   finally {await client.end();}
 }
+console.info("Checking read-only persistent baseline");
 const before=await persistentEvidence();
 if(JSON.stringify(before.history)!==JSON.stringify(["001_catalog","002_import_role_privileges","003_import_role_read_access"]))throw new Error("Persistent development history rejected");
 if(before.generatedRoles.length!==0||before.disposableConnections!==0)throw new Error("Disposable publication resources were not clean before acceptance");
@@ -34,10 +38,16 @@ try {
     ? ["pnpm.cmd --filter @nukhbapay/api test:migration:integration"]
     : ["pnpm.cmd --filter @nukhbapay/api test:catalogue-publication:integration"];
   if(process.argv.includes("--regression"))commands.push("pnpm.cmd db:test","pnpm.cmd --filter @nukhbapay/api test:migration:integration");
+  if(process.argv.includes("--compiled")){
+    commands.splice(0,commands.length,"node --test --test-concurrency=1 apps/api/dist-test/test/catalogue-publication.integration.js");
+    if(process.argv.includes("--regression"))commands.push("node --test packages/database/dist-test/database/test/*.spec.js","node --test --test-concurrency=1 apps/api/dist-test/test/migration006.integration.js");
+  }
   for(const command of commands){
     console.info(`Running: ${command}`);
+    const started=Date.now();
     const result=spawnSync(process.env.ComSpec??"cmd.exe",["/d","/s","/c",command],
       {cwd:root,env,encoding:"utf8",windowsHide:true,timeout:240000,maxBuffer:8*1024*1024});
+    console.info(`Command completed after ${Date.now()-started}ms; status=${result.status}; error=${result.error?.code??"none"}`);
     process.stdout.write(result.stdout??"");process.stderr.write(result.stderr??"");
     if(result.status!==0||result.error){failed=true;break;}
   }
