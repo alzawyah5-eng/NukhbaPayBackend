@@ -2,7 +2,7 @@
 
 Node 24 HTTPS BFF with the supplied React/TypeScript staff frontend integrated in `client/`. The API remains 127.0.0.1:3000; this BFF targets https://localhost:3001 on loopback. Real Auth0 sign-in and session activation are disabled in the CLI.
 
-Run `pnpm.cmd staff:build`, then follow [development certificate setup](../../docs/security/staff-server-sessions.md). Private certificates and DPAPI-protected passphrases belong outside OneDrive/source/checkpoints. Windows trust was intentionally left unchanged. Use the documented explicit pinned-client-only launcher mode with clients that trust the exact public certificate; browser trust is not established. The normal launcher otherwise requires the reviewed current-user trust entry. Never disable certificate verification.
+Run `pnpm.cmd staff:dev` from the repository root to build and start the local preview at `https://localhost:3001/preview/overview`. It reuses a valid local certificate or creates one under `%LOCALAPPDATA%`; Windows trust is not changed. The browser will not trust that certificate until you explicitly perform the separate trust step in [development certificate setup](../../docs/security/staff-server-sessions.md). Do not bypass certificate warnings or disable verification. Private certificates and DPAPI-protected passphrases belong outside OneDrive/source/checkpoints.
 
 The browser receives no Auth0 access token, ID token, client secret or backend source. Trusted server composition may now supply `Auth0Login` and the existing session lifecycle to enable the authorization-code/PKCE routes. CLI composition still supplies neither. No route accepts IDs, JSON actors or assurance as authority. The fixed script reads audited session status and performs CSRF-protected logout; configured logout returns a fixed provider URL only after committed local revocation.
 
@@ -12,7 +12,7 @@ The React application supports both confirmed local logout (204) and configured 
 
 The internal session lifecycle and proposed PostgreSQL candidate live in the existing application/database packages, not browser code. Existing API authentication modes/JWT checks, IAM/catalogue restrictions and financial logic remain unchanged. See ADR 0022 and current verification for actual evidence and activation blockers.
 
-Commands: `pnpm.cmd staff:build`, `pnpm.cmd staff:typecheck`, `pnpm.cmd staff:test`, `pnpm.cmd staff:sessions:test:integration`. HTTPS tests require explicitly supplied local test certificate settings; integration additionally requires the existing verified disposable PostgreSQL fixture settings. Missing configuration fails rather than skipping tests.
+Commands: `pnpm.cmd staff:dev` (build and run local preview), `pnpm.cmd staff:build`, `pnpm.cmd staff:typecheck`, `pnpm.cmd staff:test`, `pnpm.cmd staff:sessions:test:integration`. HTTPS tests require explicitly supplied local test certificate settings; integration additionally requires the existing verified disposable PostgreSQL fixture settings. Missing configuration fails rather than skipping tests.
 
 The build compiles the BFF and bundles the browser application into `dist/client`; `staff:start` requires this output. It uses the existing TLS launcher and certificate policy above. No Vite server, separate application, external hosting or public deployment is required.
 

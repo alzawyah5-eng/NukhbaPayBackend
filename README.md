@@ -49,6 +49,10 @@ corepack.cmd pnpm api:test
 
 Start the liveness-only API with `corepack.cmd pnpm api:start`. It binds to `127.0.0.1:3000` by default. Configuration is limited to `API_HOST` (an IP address literal) and `API_PORT` (1-65535). On other shells, invoke `corepack pnpm` instead of `corepack.cmd pnpm`.
 
+## Run the local staff frontend
+
+From the repository root, run `corepack.cmd pnpm staff:dev`. This single command builds the frontend, reuses or creates a localhost HTTPS certificate without changing Windows trust, and starts the fictional UI preview at `https://localhost:3001/preview/overview`. Browser trust requires a separate explicit certificate-trust step; do not bypass certificate warnings. Staff sign-in remains disabled.
+
 ```bash
 node --experimental-strip-types scripts/demo.ts
 node --experimental-strip-types --test packages/domain/test/*.test.ts packages/provider-adapters/test/*.test.ts
