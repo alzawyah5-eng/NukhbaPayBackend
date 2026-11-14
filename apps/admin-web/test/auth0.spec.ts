@@ -7,6 +7,22 @@ import { Auth0Login, transactionCookie } from "../src/auth0.js";
 import { config, fixture } from "./fixtures/auth0-fixture.js";
 type Claims = Record<string, unknown>;
 
+test('current staff projection requires fresh session, enrollment, tenant authority and audited store availability',async()=>{
+  const f=await fixture(),start=f.begin(),raw=await f.login.complete(start.callback,start.cookie);
+  const self=await f.sessions.readProfile(raw);assert.equal(self.ok,true);
+  if(!self.ok)throw new Error('Profile denied');
+  assert.equal(self.profile.staffId,'00000000-0000-4000-8000-000000000001');assert.equal(self.profile.tenantId,config.tenantId);
+  assert.equal(JSON.stringify(self).includes('synthetic-staff'),false);assert.equal(JSON.stringify(self).includes(raw),false);
+  assert.equal((await f.sessions.readProfile('A'.repeat(43))).ok,false);
+  f.membership();assert.equal((await f.sessions.readProfile(raw)).ok,false);
+  for(const change of ['store','audit','suspend','unenroll','version','database','disabledIdentity']as const) {
+    const next=await fixture(),s=next.begin(),token=await next.login.complete(s.callback,s.cookie);next[change]();
+    assert.equal((await next.sessions.readProfile(token)).ok,false);
+  }
+  const expired=await fixture(),s=expired.begin(),token=await expired.login.complete(s.callback,s.cookie);
+  expired.advance(300001);assert.equal((await expired.sessions.readProfile(token)).ok,false);
+});
+
 test("authorization request binds independent state/nonce and S256 PKCE, confidential exchange stays server-side", async () => {
   const f = await fixture(), start = f.begin(), p = start.url.searchParams;
   assert.equal(start.url.origin, new URL(config.issuer).origin); assert.equal(p.get("redirect_uri"), config.callbackUrl);
@@ -67,7 +83,7 @@ test("RFC9068 access-token audience, client, human profile and identity must mat
 });
 
 test("unenrolled/suspended staff, foreign membership, audit and store failures never mint browser sessions", async () => {
-  for (const change of ["unenroll", "suspend", "membership", "audit", "store"] as const) {
+  for (const change of ["unenroll", "suspend", "membership", "audit", "store", "database", "disabledIdentity"] as const) {
     const f = await fixture(), s = f.begin(); f[change](); await assert.rejects(() => f.login.complete(s.callback, s.cookie)); assert.equal(f.rows.size, 0);
   }
   for (const change of ["suspend", "membership", "version"] as const) {

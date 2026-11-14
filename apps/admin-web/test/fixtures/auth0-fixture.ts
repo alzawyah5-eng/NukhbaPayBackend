@@ -19,12 +19,16 @@ export async function fixture(callbackUrl = config.callbackUrl) {
   let idChanges: Claims = {}, accessChanges: Claims = {}, tokenChanges: Claims = {}, wrongKey = false, exchanges = 0;
   let responseMode = "ok", nonce = "", lastBody = new URLSearchParams();
   let beforeStore: (() => Promise<void>) | undefined;
+  let databaseFailure=false,disabledIdentity=false;
   const rows = new Map<string, { revoked: boolean; binding: string; expires: number }>();
   const actors = new TrustedStaffActorBoundary({ now: () => new Date(ms), sessionIssuers: [config.issuer],
     repository: {
-      findByTrustedIdentity: async i => enrolled && i.issuer === config.issuer && i.subject === "synthetic-staff" ? {
-        staffId, staffStatus: suspended ? "SUSPENDED" : "ACTIVE", identityStatus: "ACTIVE", tokensValidAfter: null, authzVersion: version,
-      } : null,
+      findByTrustedIdentity: async i => {
+        if(databaseFailure)throw new Error('Private synthetic database failure');
+        return enrolled && i.issuer === config.issuer && i.subject === "synthetic-staff" ? {
+          staffId, staffStatus: suspended ? "SUSPENDED" : "ACTIVE", identityStatus: disabledIdentity?'DISABLED':'ACTIVE', tokensValidAfter: null, authzVersion: version,
+        } : null;
+      },
       findPlatformRoleGrants: async () => [],
       findTenantMembership: async (_staff, tenant) => member && tenant === config.tenantId ? {
         membershipId: config.tenantId, tenantId: config.tenantId, status: "ACTIVE", version: 1n, roleGrants: [],
@@ -84,5 +88,6 @@ export async function fixture(callbackUrl = config.callbackUrl) {
     mode: (v: string) => { responseMode = v; }, wrongKey: () => { wrongKey = true; }, advance: (v: number) => { ms += v; },
     suspend: () => { suspended = true; }, membership: () => { member = false; }, unenroll: () => { enrolled = false; },
     version: () => { version++; }, audit: () => { auditFailure = true; }, store: () => { storeFailure = true; },
+    database:()=>{databaseFailure=true;},disabledIdentity:()=>{disabledIdentity=true;},
   };
 }

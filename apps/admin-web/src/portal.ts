@@ -8,6 +8,8 @@ export const PORTAL_COOKIE_NAME="__Host-nukhbapay_staff";
 export interface InternalSessionPort {
   validate(token:string):Promise<{readonly ok:boolean;readonly reason?:string}>;
   revoke(token:string):Promise<{readonly ok:boolean;readonly reason?:string}>;
+  readProfile?(token:string):Promise<{readonly ok:boolean;readonly reason?:string;
+    readonly profile?:{readonly staffId:string;readonly tenantId:string|null;readonly expiresAtMs:number}}>;
 }
 const tokenPattern=/^[A-Za-z0-9_-]{43}$/;
 const unavailable=()=>new Error("Staff HTTPS portal unavailable");
@@ -85,6 +87,21 @@ export async function createStaffPortal(options:{
         if(req.method==='GET' && req.url==='/auth/login' && options.login) {
           const transaction=options.login.begin(sessionCookie(req),sessionCookie(req,TRANSACTION_COOKIE_NAME));
           res.setHeader('Set-Cookie',transaction.cookie);res.writeHead(303,{location:transaction.location});res.end();return;
+        }
+        if(req.method==='GET' && req.url==='/auth/config') {
+          send(res,200,JSON.stringify({loginPath:options.login?'/auth/login':null}));return;
+        }
+        if(req.method==='GET' && req.url==='/auth/me') {
+          if(!options.sessions?.readProfile){send(res,503,'{"error":"Staff profile unavailable"}');return;}
+          const token=sessionCookie(req);if(!token){send(res,401,'{"error":"Authentication required"}');return;}
+          const result=await options.sessions.readProfile(token);
+          if(!result.ok){send(res,result.reason==='UNAVAILABLE'?503:401,'{"error":"Staff profile unavailable"}');return;}
+          const profile=result.profile,uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+          if(!profile || !uuid.test(profile.staffId) || profile.tenantId!==null&&!uuid.test(profile.tenantId) ||
+            !Number.isSafeInteger(profile.expiresAtMs)||profile.expiresAtMs<1)throw unavailable();
+          // Self-read is the only implemented browser capability. No role claims select management routes.
+          send(res,200,JSON.stringify({staffId:profile.staffId,tenantId:profile.tenantId,expiresAtMs:profile.expiresAtMs,
+            navigation:['/overview']}));return;
         }
         if(callback) {
           res.setHeader('Set-Cookie',transactionCookie('',true));
