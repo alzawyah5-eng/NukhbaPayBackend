@@ -1,3 +1,4 @@
+import { executeSyntheticPublication } from "./synthetic-publication-workflow.js";
 import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { consumeSubmissionEvidence, submissionDigest, assertGeneratedDraftPublicationCandidate } from "@nukhbapay/application";
@@ -163,5 +164,5 @@ export async function createCataloguePublicationDraftStore(input:PublicationDraf
       await client.query("COMMIT");return Object.freeze({candidateId:candidate.candidateId,priceVersion:candidate.priceVersion,outcome:"CREATED",execution:"NOT_AUTHORIZED"});
     } catch(error) {await client.query("ROLLBACK").catch(()=>undefined);throw error;} finally {client.release();}
   }
-  return Object.freeze({save: (value:unknown)=>save(value),submit:async(value:unknown)=>{const proof=consumeSubmissionEvidence(value);return save(proof.candidate,proof);},close:async()=>pool.end()});
+  return Object.freeze({executePublication:(value:unknown)=>executeSyntheticPublication(pool,value),save: (value:unknown)=>save(value),submit:async(value:unknown)=>{const proof=consumeSubmissionEvidence(value);return save(proof.candidate,proof);},close:async()=>pool.end()});
 }

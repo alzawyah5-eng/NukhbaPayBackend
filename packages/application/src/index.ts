@@ -85,3 +85,6 @@ export type {
 
 export { prepareSyntheticPriceSubmission, consumeSubmissionEvidence, submissionDigest, SUBMISSION_CANONICALIZATION, PUBLICATION_PERMISSION_CONTRACTS } from "./catalog/submission-evidence.js";
 export type { SubmissionEvidence } from "./catalog/submission-evidence.js";
+
+export { prepareSyntheticPublicationCommand, consumePublicationCommand, independentlyVerifyPublicationPayload } from "./catalog/publication-workflow.js";
+export type { PublicationAction, PublicationCommand, PublicationCommandTicket, SyntheticPublicationAuthority, SyntheticPublicationPermission } from "./catalog/publication-workflow.js";
