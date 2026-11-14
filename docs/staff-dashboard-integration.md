@@ -7,7 +7,7 @@ Track C integrates the supplied React frontend into `apps/admin-web`, on `brick3
 - `frontend-handover/nukhbapay-staff-react`: React 19, TypeScript, Vite 6, React Router 7 and Lucide. Thirteen route views in `DashboardPages.tsx`, shared `AppShell`/`UI`, CSS brand tokens, original logo, fictional data and local demo context. No real auth client or API service was supplied.
 - `frontend-handover/STAFF MANAGEMENT DESIGN NUKHBAPAY`: all thirteen numbered 1440 × 900 reference PNGs, UI kit `.fig`, foundation PNG, primary/secondary button PNGs, success badge, logo and handoff document. Overview and sign-in reference images were visually inspected. The source screen/component/CSS implementation is retained; browser screenshot parity has not been established.
 - `apps/admin-web`: existing HTTPS BFF with host/origin checks, no-store, restrictive CSP, HttpOnly secure session cookie and CSRF-protected logout. Default CLI disables identity/session activation.
-- `apps/api`: only the health controller is registered in `AppModule`. Internal authorization/workflow foundations are not browser HTTP endpoints. Proposed `/staff-api/v1/...` routes in the handover are not implemented contracts.
+- `apps/api`: only health is publicly available by default. Track B also registers guarded synthetic payment/kiosk catalogue reads; normal bootstrap supplies no machine client dependencies. Internal staff authorization/workflow foundations are not browser HTTP endpoints. Proposed `/staff-api/v1/...` routes in the handover are not implemented contracts.
 
 ## Integration boundaries
 
