@@ -23,7 +23,7 @@ async function persistentEvidence(){
   await client.connect();console.info("Read-only baseline connected in",Date.now()-started,"ms");
   try {await client.query("BEGIN READ ONLY");const history=(await client.query("SELECT name FROM nukhabapay.schema_migrations ORDER BY id")).rows.map(row=>row.name);
     const databases=(await client.query("SELECT datname FROM pg_database ORDER BY datname")).rows.map(row=>row.datname);
-    const generatedRoles=(await client.query("SELECT rolname FROM pg_roles WHERE rolname ~ '^nukh_(publication|hostile)_[0-9a-f]{20}$' ORDER BY rolname")).rows.map(row=>row.rolname);
+    const generatedRoles=(await client.query("SELECT rolname FROM pg_roles WHERE rolname ~ '^nukh_(publication|hostile|catalogue|read_audit)_[0-9a-f]{20}$' ORDER BY rolname")).rows.map(row=>row.rolname);
     const disposableConnections=(await client.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname ~ '^nukhabapay_b3b3_[0-9a-f]{32}$'")).rows[0].n;
     await client.query("COMMIT");return {history,databases,generatedRoles,disposableConnections};}
   finally {await client.end();}
@@ -55,5 +55,5 @@ try {
   const after=await persistentEvidence();
   if(JSON.stringify(after)!==JSON.stringify(before))throw new Error("Persistent development database evidence changed");
 }
-if(failed)throw new Error("Brick 4A regression acceptance failed");
-console.info("Brick 4A acceptance passed; persistent 001-003 history and database inventory are unchanged.");
+if(failed)throw new Error("Brick 4B synthetic regression acceptance failed");
+console.info("Brick 4B synthetic acceptance passed; persistent 001-003 history and database inventory are unchanged.");

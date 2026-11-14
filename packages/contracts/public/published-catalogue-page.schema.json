@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.nukhbapay.example/public/published-catalogue-page.v1.schema.json",
+  "title": "SyntheticPublishedCataloguePageV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["catalogue_version", "items", "next_cursor"],
+  "properties": {
+    "catalogue_version": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "items": {"type": "array", "maxItems": 50, "items": {"$ref": "catalog-product.schema.json"}},
+    "next_cursor": {"oneOf": [{"type": "null"}, {"type": "string", "pattern": "^[0-9a-f]{64}$"}]}
+  },
+  "description": "Public projection of activated synthetic publication heads. Item catalog_version is the immutable publication event UUID. Prices remain indicative and confer no execution authority."
+}

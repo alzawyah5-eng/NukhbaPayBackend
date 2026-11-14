@@ -36,3 +36,6 @@ export {
   SecurityAuditPostgresRepository,
   StaffIdentityPostgresRepository,
 } from "./repositories/staff-identity-repository.js";
+
+export { createPublishedCatalogueReader, createCatalogueReadAuditWriter } from "./published-catalogue-reader.js";
+export type { PublishedCatalogueDatabaseConfig } from "./published-catalogue-reader.js";

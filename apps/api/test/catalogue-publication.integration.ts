@@ -5,9 +5,10 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { prepareSyntheticPublicationCommand, independentlyVerifyPublicationPayload, type PublicationCommand, type SyntheticPublicationPermission, prepareSyntheticPriceSubmission, submissionDigest, generateDraftPublicationCandidate, type DraftPublicationRequest } from "@nukhbapay/application";
-import { createCataloguePublicationDraftStore, PublicationDraftConflictError, PublicationDraftStaleError } from "@nukhbapay/database";
+import { createPublishedCatalogueReader, createCatalogueReadAuditWriter, createCataloguePublicationDraftStore, PublicationDraftConflictError, PublicationDraftStaleError } from "@nukhbapay/database";
 import { Client } from "pg";
 import { attestVerifiedStaffIdentity } from "@nukhbapay/application/verified-identity";
+import { exercisePublishedCatalogueHttp } from "./fixtures/published-catalogue-http.js";
 import { forDatabase, withDisposableIamDatabase } from "./fixtures/disposable-iam-database.js";
 
 const root=fileURLToPath(new URL("../../../../",import.meta.url));
@@ -65,6 +66,9 @@ test("proposed 007 provides atomic, immutable, tenant-scoped draft publication e
       await owner.query("BEGIN");try{
         await owner.query("SELECT set_config('nukhbapay.workflow_migration','BRICK_4B_WORKFLOW_SYNTHETIC',true)");await owner.query(workflowSql);await owner.query("COMMIT");
       }catch(error){await owner.query("ROLLBACK");throw error;}
+      const readSql=readFileSync(path.join(databaseRoot,"pending-migrations/010_synthetic_published_catalogue.sql"),"utf8");
+      await owner.query("BEGIN");try{await assert.rejects(()=>owner.query(readSql),{code:"42501"});}finally{await owner.query("ROLLBACK");}
+      await owner.query("BEGIN");try{await owner.query("SELECT set_config('nukhbapay.catalogue_read_migration','BRICK_4B_READ_SYNTHETIC',true)");await owner.query(readSql);await owner.query("COMMIT");}catch(error){await owner.query("ROLLBACK");throw error;}
       const tenantId=randomUUID(),otherTenantId=randomUUID(),productId=randomUUID(),accountId=randomUUID(),snapshotId=randomUUID(),mappingId=randomUUID(),offerRowId=randomUUID();
       await owner.query("INSERT INTO nukhabapay.tenants(id,tenant_key) VALUES($1,'publication-tenant'),($2,'other-publication-tenant')",[tenantId,otherTenantId]);
       await owner.query(`INSERT INTO nukhabapay.products(id,canonical_product_key,brand,redemption_country,currency,face_value_minor,fulfillment_method,terms_version)
@@ -192,7 +196,7 @@ test("proposed 007 provides atomic, immutable, tenant-scoped draft publication e
         const row=(await fixture.fixtureClient.query("SELECT * FROM nukhabapay.price_submission_evidence")).rows[0];
         assert.equal(row.creator_staff_id,staffId);assert.equal(submissionDigest(row.canonical_payload),row.candidate_id);
         await assert.rejects(()=>fixture.fixtureClient.query("UPDATE nukhabapay.price_submission_evidence SET subject='tampered'"),{code:"42501"});
-        await foundation.test("synthetic approval, activation and rollback preserve authority and immutable history",async()=>{
+        await foundation.test("synthetic approval, activation and rollback preserve authority and immutable history",async workflow=>{
           const approver=randomUUID(),operator=randomUUID();let permissionDenied=false,tenantMismatch=false,authorityRevoked=false;
           const actor=(id:string,role:string,permission:SyntheticPublicationPermission)=>{
             const member=randomUUID(),who=attestVerifiedStaffIdentity({...identity,subject:id});
@@ -268,6 +272,42 @@ test("proposed 007 provides atomic, immutable, tenant-scoped draft publication e
           assert.equal((await fixture.fixtureClient.query("SELECT count(*)::int AS n FROM nukhabapay.price_workflow_audit")).rows[0].n,5);
           const prices=(await fixture.fixtureClient.query("SELECT c.total_amount_minor::text AS total FROM nukhabapay.price_workflow_versions v JOIN nukhabapay.catalogue_publication_candidates c USING(candidate_id,tenant_id,product_id) ORDER BY v.revision")).rows;
           assert.deepEqual(prices.map(r=>r.total),["10200","10300","10200"]);
+          await workflow.test("published-only payment and kiosk APIs enforce independent client and reader boundaries",async()=>{
+            const readerRole=`nukh_catalogue_${randomUUID().replaceAll("-","").slice(0,20)}`,auditRole=`nukh_read_audit_${randomUUID().replaceAll("-","").slice(0,20)}`;
+            let reader:Awaited<ReturnType<typeof createPublishedCatalogueReader>>|undefined,audit:Awaited<ReturnType<typeof createCatalogueReadAuditWriter>>|undefined;
+            try{
+              for(const role of [readerRole,auditRole])await fixture.fixtureClient.query(`CREATE ROLE ${identifier(role)} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS`);
+              await owner.query("BEGIN");try{await owner.query("SELECT set_config('nukhabapay.catalogue_reader_role',$1,true),set_config('nukhabapay.catalogue_audit_role',$2,true)",[readerRole,auditRole]);await owner.query(readFileSync(path.join(databaseRoot,"roles/grant_published_catalogue_clients.sql"),"utf8"));await owner.query("COMMIT");}catch(error){await owner.query("ROLLBACK");throw error;}
+              const config=(role:string)=>{const u=new URL(forDatabase(process.env["DB_TEST_ADMIN_URL"]!,fixture.databaseName));u.username=role;u.password=randomUUID();return {connectionString:u.href,expectedRole:role,expectedDatabase:fixture.databaseName};};
+              const readerConfig=config(readerRole);reader=await createPublishedCatalogueReader(readerConfig);audit=await createCatalogueReadAuditWriter(config(auditRole));
+              const direct=new Client({connectionString:readerConfig.connectionString});await direct.connect();try{
+                assert.equal((await direct.query("SELECT count(product_id)::int AS n FROM nukhabapay.published_catalogue_public")).rows[0].n,0);
+                for(const table of ["catalogue_publication_candidates","price_submission_evidence","price_workflow_versions","price_workflow_audit","published_catalogue_read_audit","provider_offers","staff_users"]){await assert.rejects(()=>direct.query(`SELECT * FROM nukhabapay.${table}`),{code:"42501"});}
+                await assert.rejects(()=>direct.query("DELETE FROM nukhabapay.published_catalogue_read_audit"),{code:"42501"});
+              }finally{await direct.end();}
+              await owner.query(`GRANT SELECT ON nukhabapay.catalogue_publication_candidates TO ${identifier(readerRole)}`);
+              await assert.rejects(()=>createPublishedCatalogueReader(readerConfig),/unavailable/);
+              await owner.query(`REVOKE SELECT ON nukhabapay.catalogue_publication_candidates FROM ${identifier(readerRole)}`);
+              const secondProductId=randomUUID(),unpublishedId=randomUUID(),secondSnapshot=randomUUID(),secondMapping=randomUUID(),secondOffer=randomUUID();
+              const secondProduct={...product,canonicalProductId:product.canonicalProductId+"_second"};
+              await owner.query(`INSERT INTO nukhabapay.products(id,canonical_product_key,brand,redemption_country,currency,face_value_minor,fulfillment_method,terms_version) VALUES($1,$2,$3,'AE','AED',10000,'DIGITAL_PIN',$4),($5,$6,$3,'AE','AED',10000,'DIGITAL_PIN',$4)`,[secondProductId,secondProduct.canonicalProductId,product.brand,product.termsVersion,unpublishedId,product.canonicalProductId+"_unpublished"]);
+              await owner.query(`INSERT INTO nukhabapay.provider_snapshots(id,tenant_id,provider_account_id,snapshot_key,source_version,observed_at,status,row_count,completed_at) VALUES($1,$2,$3,'read-api-snapshot','synthetic-v2','2026-11-09T09:00:00Z','COMPLETE',1,'2026-11-09T09:05:00Z')`,[secondSnapshot,tenantId,accountId]);
+              await owner.query(`INSERT INTO nukhabapay.product_mappings(id,tenant_id,provider_account_id,provider_sku,product_id,mapping_version,status,provenance_kind,provenance,source_snapshot_id) VALUES($1,$2,$3,'SYNTH-SECOND',$4,1,'APPROVED','IMPORT','{"source":"synthetic"}'::jsonb,$5)`,[secondMapping,tenantId,accountId,secondProductId,secondSnapshot]);
+              await owner.query(`INSERT INTO nukhabapay.provider_offers(id,tenant_id,provider_account_id,provider_snapshot_id,product_mapping_id,product_mapping_version,product_id,face_value_minor,provider_offer_key,provider_debit_minor,additional_provider_fee_minor,upfront_discount_minor,available,observed_at,valid_until) VALUES($1,$2,$3,$4,$5,1,$6,10000,'second-offer',9600,50,400,true,'2026-11-09T09:00:00Z','2026-11-09T11:00:00Z')`,[secondOffer,tenantId,accountId,secondSnapshot,secondMapping,secondProductId]);
+              const secondRequest:DraftPublicationRequest={...request,productId:secondProductId,product:secondProduct,idempotencyKey:randomUUID(),sourceSnapshots:[{...request.sourceSnapshots[0]!,snapshotId:secondSnapshot,snapshotKey:"read-api-snapshot",sourceVersion:"synthetic-v2"}],offers:[{...request.offers[0]!,snapshotId:secondSnapshot,offerId:"second-offer",identity:secondProduct}]};
+              const submitted=await prepareSyntheticPriceSubmission(deps,identity,secondRequest);await store!.submit(submitted);
+              await run(reviewer,{...command("APPROVE",submitted.candidate.candidateId,1),productId:secondProductId});
+              await exercisePublishedCatalogueHttp({reader,audit,tenantId,otherTenantId,productId,unpublishedId,secondProductId,oldVersion:restored.operationId,
+                activateSecond:()=>run(publisher,{...command("ACTIVATE",submitted.candidate.candidateId,1),productId:secondProductId}),
+                republish:()=>run(publisher,command("ACTIVATE",nextProof.candidate.candidateId,4,restored.operationId)),
+                denyReader:async()=>{await owner.query(`REVOKE SELECT(product_id,name,publication_id,total_amount_minor,valid_until) ON nukhabapay.published_catalogue_public FROM ${identifier(readerRole)}`);},
+                restoreReader:async()=>{await owner.query(`GRANT SELECT(product_id,name,publication_id,total_amount_minor,valid_until) ON nukhabapay.published_catalogue_public TO ${identifier(readerRole)}`);},
+                denyAudit:async()=>{await owner.query(`CREATE TRIGGER reject_catalogue_read_audit BEFORE INSERT ON nukhabapay.published_catalogue_read_audit FOR EACH ROW EXECUTE FUNCTION nukhabapay.reject_publication_evidence_mutation()`);},
+                restoreAudit:async()=>{await owner.query("DROP TRIGGER reject_catalogue_read_audit ON nukhabapay.published_catalogue_read_audit");}});
+              assert.ok((await fixture.fixtureClient.query("SELECT count(*)::int AS n FROM nukhabapay.published_catalogue_read_audit")).rows[0].n>0);
+              await assert.rejects(()=>fixture.fixtureClient.query("DELETE FROM nukhabapay.published_catalogue_read_audit"),{code:"42501"});
+            }finally{await reader?.close();await audit?.close();for(const role of [readerRole,auditRole]){if((await fixture.fixtureClient.query("SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname=$1) AS ok",[role])).rows[0].ok){await fixture.fixtureClient.query(`DROP OWNED BY ${identifier(role)}`);await fixture.fixtureClient.query(`DROP ROLE ${identifier(role)}`);}}}
+          });
           for(const table of ["price_workflow_approvals","price_workflow_versions","price_workflow_operations","price_workflow_audit"]){
             await assert.rejects(()=>fixture.fixtureClient.query(`DELETE FROM nukhabapay.${table}`),{code:"42501"});
           }
