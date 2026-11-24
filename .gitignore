@@ -83,3 +83,6 @@ nukhabapay-worktrees/
 /packages/provider-contracts/src/index.d.ts
 /packages/provider-contracts/src/index.js
 /packages/provider-contracts/src/index.js.map
+
+.worktrees/
+
