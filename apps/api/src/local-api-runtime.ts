@@ -2,7 +2,9 @@ import { Module, type LoggerService, type Type } from "@nestjs/common";
 import { createIdentityRuntime, parseIdentityRuntimeConfiguration } from "@nukhbapay/database/identity-runtime";
 import { createApiApplication } from "./http-application.js";
 import { AppModule } from "./app.module.js";
+import { STAFF_STORAGE_HEALTH } from "./health.controller.js";
 import { parseApiConfig } from "./api.config.js";
+import { probeWindowsStaffStorage } from "./windows-staff-storage-probe.js";
 import { parseIdentityConfiguration } from "./modules/identity/identity.config.js";
 import { OidcAccessTokenVerifier } from "./modules/identity/oidc-access-token.verifier.js";
 import type { JwksFetch } from "./modules/identity/trusted-jwks.js";
@@ -28,6 +30,7 @@ export async function createLocalApiRuntime(env: Environment, dependencies: {
   readonly logger?: LoggerService | false;
   readonly administrationReaders?: AdministrationReaders;
   readonly createIam?: (env: Environment) => Promise<IamRuntime>;
+  readonly probeStaffStorage?: () => Promise<boolean>;
 } = {}) {
   let iam: IamRuntime | undefined;
   let verifier: OidcAccessTokenVerifier | undefined;
@@ -42,6 +45,12 @@ export async function createLocalApiRuntime(env: Environment, dependencies: {
     const listener = parseApiConfig(env);
     const mode = env["API_STAFF_AUTH_MODE"] ?? "disabled";
     if (mode !== "disabled" && mode !== "local-synthetic") throw new LocalRuntimeUnavailableError();
+    const healthMode = env["API_HEALTH_MODE"] ?? "process";
+    const windowsStaffHealth = healthMode === "windows-staff-postgresql";
+    if ((healthMode !== "process" && !windowsStaffHealth) || (windowsStaffHealth &&
+        (listener.host !== "127.0.0.1" || mode !== "disabled" || env["NODE_ENV"] === "production"))) {
+      throw new LocalRuntimeUnavailableError();
+    }
     if (mode === "local-synthetic") {
       if (!["127.0.0.1", "::1"].includes(listener.host)) throw new LocalRuntimeUnavailableError();
       const config = parseIdentityConfiguration(env);
@@ -78,7 +87,22 @@ export async function createLocalApiRuntime(env: Environment, dependencies: {
       beforeApplicationShutdown: () => { stopping = true; verifier?.close(); },
       onApplicationShutdown: closeResources,
     };
-    @Module({ imports: [dependencies.rootModule ?? AppModule], providers: [{ provide: "LOCAL_API_LIFECYCLE", useValue: lifecycle }] })
+    const probeStaffStorage = dependencies.probeStaffStorage ?? probeWindowsStaffStorage;
+    let storageCheck: Promise<boolean> | undefined;
+    const staffStorageReady = (): Promise<boolean> => {
+      if (stopping) return Promise.resolve(false);
+      return storageCheck ??= Promise.resolve().then(probeStaffStorage)
+        .then((ready) => !stopping && ready === true, () => false)
+        .finally(() => { storageCheck = undefined; });
+    };
+    class LocalStaffStorageHealthModule {}
+    const healthImports = windowsStaffHealth ? [{
+      module: LocalStaffStorageHealthModule,
+      global: true,
+      providers: [{ provide: STAFF_STORAGE_HEALTH, useValue: staffStorageReady }],
+      exports: [STAFF_STORAGE_HEALTH],
+    }] : [];
+    @Module({ imports: [dependencies.rootModule ?? AppModule, ...healthImports], providers: [{ provide: "LOCAL_API_LIFECYCLE", useValue: lifecycle }] })
     class LocalRuntimeModule {}
     const administration = iam && dependencies.administrationReaders
       ? createStaffAdministration({ repository: iam.repository, auditWriter: iam.auditWriter,

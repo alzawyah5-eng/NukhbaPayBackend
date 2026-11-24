@@ -22,11 +22,42 @@ test("disabled runtime has internal readiness, public health only, and idempoten
     assert.deepEqual(await runtime.checkReadiness(), { ready: true });
     await runtime.app.listen(0, "127.0.0.1");
     const base = `http://127.0.0.1:${(runtime.app.getHttpServer().address() as AddressInfo).port}`;
-    assert.equal((await fetch(base + "/health/live")).status, 200);
+    const health = await fetch(base + "/health/live");
+    assert.equal(health.status, 200);
+    assert.deepEqual(await health.json(), { status: "ok" });
     for (const path of ["/health/ready", "/__acceptance/staff/self"]) assert.equal((await fetch(base + path)).status, 404);
     assert.equal(created, false);
   } finally { await Promise.all([runtime.close(), runtime.close()]); }
   assert.deepEqual(await runtime.checkReadiness(), { ready: false });
+});
+
+test("Windows staff health reports the current storage probe result without leaking errors", async () => {
+  let ready = false;
+  let fail = false;
+  const runtime = await createLocalApiRuntime({ API_HEALTH_MODE: "windows-staff-postgresql" }, {
+    logger: false,
+    probeStaffStorage: async () => {
+      if (fail) throw new Error("private probe failure");
+      return ready;
+    },
+  });
+  try {
+    await runtime.app.listen(0, "127.0.0.1");
+    const base = `http://127.0.0.1:${(runtime.app.getHttpServer().address() as AddressInfo).port}`;
+    const check = async (status: number, body: { status: string; database: string }) => {
+      const response = await fetch(base + "/health/live");
+      assert.equal(response.status, status);
+      assert.equal(response.headers.get("cache-control"), "no-store");
+      assert.deepEqual(await response.json(), body);
+    };
+    await check(503, { status: "unavailable", database: "unavailable" });
+    ready = true;
+    await check(200, { status: "ok", database: "connected" });
+    fail = true;
+    await check(503, { status: "unavailable", database: "unavailable" });
+  } finally {
+    await runtime.close();
+  }
 });
 
 test("startup rejects invalid mode, partial disabled configuration, external/production trust and absent synthetic transport before IAM", async () => {
@@ -34,6 +65,10 @@ test("startup rejects invalid mode, partial disabled configuration, external/pro
   let created = 0;
   for (const env of [
     { API_STAFF_AUTH_MODE: "enabled" }, { IDENTITY_ISSUER_URL: "private-config-marker" },
+    { API_HEALTH_MODE: "unknown" },
+    { API_HEALTH_MODE: "windows-staff-postgresql", API_HOST: "0.0.0.0" },
+    { API_HEALTH_MODE: "windows-staff-postgresql", NODE_ENV: "production" },
+    { API_HEALTH_MODE: "windows-staff-postgresql", API_STAFF_AUTH_MODE: "local-synthetic" },
     { API_STAFF_AUTH_MODE: "disabled", ...iamSettings() },
     { API_STAFF_AUTH_MODE: "local-synthetic" },
     { API_STAFF_AUTH_MODE: "local-synthetic", ...environment({ IDENTITY_ENVIRONMENT: "production" }), ...iamSettings() },

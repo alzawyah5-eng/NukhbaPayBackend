@@ -93,6 +93,12 @@ try {
       $values['NUKHBAPAY_STAFF_ENROLLMENT_SUBJECT']=Unprotect-LocalValue $retry
     }finally{$retry.Dispose()}
   }while($true)
+  if(!$StorageOnly){
+    $publicCertificate=Join-Path $project '.local\staff-workspace-localhost.cer'
+    if(!(Test-Path -LiteralPath $publicCertificate)){
+      [IO.File]::Copy($values['NUKHBAPAY_STAFF_TLS_CERT_PATH'],$publicCertificate)
+    }
+  }
   if($PreflightOnly -or $StorageOnly){return}
   $listeners=@([Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() | Where-Object Port -eq 3001)
   if($listeners.Count){

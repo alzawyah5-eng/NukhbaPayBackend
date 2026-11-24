@@ -131,16 +131,17 @@ pnpm api:start
 ```
 The API binds to `http://127.0.0.1:3000` by default. Check `/health/live` to verify startup.
 
+With the Windows Staff Portal running, set `$env:API_HEALTH_MODE = 'windows-staff-postgresql'` in the API's PowerShell terminal before starting it. In this loopback mode, `/health/live` returns `200 {"status":"ok","database":"connected"}` when the portal's live PostgreSQL checks pass. A failed or unreachable storage check returns `503 {"status":"unavailable","database":"unavailable"}`.
+
 ### Start the Windows Staff Portal
 
-With the existing local database inspection and enrollment in place, run:
+With the existing local database inspection, enrollment, and build in place, run this from the workspace folder that contains `backend`:
 
 ```powershell
-corepack.cmd pnpm api:build
-corepack.cmd pnpm staff:local
+powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\backend\scripts\staff-local.ps1
 ```
 
-First-time setup collects credentials at hidden prompts and saves them privately for your Windows account after preflight passes. Open `https://localhost:3001/login` once the launcher prints the link. [Windows Auth0 and PostgreSQL runbook](docs/runbooks/staff-auth0-local-test.md)
+First-time setup collects credentials at hidden prompts. After preflight passes, Windows encrypts the saved settings for your account using DPAPI under `%LOCALAPPDATA%\Nukhbapay\staff-portal\windows-staff.clixml`. Start the launcher again from the same Windows account to reuse them. Append `-Check` to verify a saved setup without starting the portal, or `-Configure` to re-enter the settings after credentials rotate. Open `https://localhost:3001/login` once the launcher prints the link. [Windows Auth0 and PostgreSQL runbook](docs/runbooks/staff-auth0-local-test.md)
 
 ### Local infrastructure
 
