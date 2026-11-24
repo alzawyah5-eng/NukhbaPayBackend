@@ -1,0 +1,32 @@
+name: nukhabapay-postgres-test
+services:
+  postgres:
+    image: docker.io/library/postgres:17
+    network_mode: none
+    cpus: 1.0
+    mem_limit: 768m
+    environment:
+      POSTGRES_DB: nukhabapay_docker_smoke
+      POSTGRES_USER: nukhba_container_fixture
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+      POSTGRES_INITDB_ARGS: --auth-local=trust --auth-host=scram-sha-256
+    tmpfs:
+      - /var/lib/postgresql/data:rw,nosuid,nodev,size=384m
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        umask 077
+        password_file=/dev/shm/nukhbapay-test-password
+        od -An -N32 -tx1 /dev/urandom | tr -d '[:space:]' > "$$password_file"
+        test "$$(wc -c < "$$password_file")" -eq 64
+        chown postgres:postgres "$$password_file"
+        export POSTGRES_PASSWORD_FILE="$$password_file"
+        exec /usr/local/bin/docker-entrypoint.sh "$$@"
+      - --
+    command: ["postgres", "-c", "listen_addresses=127.0.0.1", "-c", "port=5432", "-c", "shared_buffers=64MB", "-c", "max_connections=20"]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-p", "5432", "-U", "nukhba_container_fixture", "-d", "nukhabapay_docker_smoke"]
+      interval: 3s
+      timeout: 3s
+      retries: 20

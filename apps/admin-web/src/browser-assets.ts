@@ -6,12 +6,17 @@ export type BrowserAssets = ReadonlyMap<string, BrowserAsset>;
 export function developmentPreviewEnabled(env: Readonly<Record<string, string | undefined>>): boolean {
   return env['NODE_ENV'] === 'development' && env['NUKHBAPAY_STAFF_UI_PREVIEW'] === 'enabled';
 }
-const routes = new Set(['/', '/login', '/overview', '/staff', '/staff/invite', '/roles', '/departments',
-  '/access-requests', '/security', '/sessions', '/audit', '/reports', '/settings', '/auth/logged-out']);
+const routes = new Set(['/', '/login', '/overview', '/staff', '/staff/commands', '/staff/invite', '/roles', '/departments',
+  '/catalogue', '/catalogue/publication', '/access-requests', '/security', '/sessions', '/audit', '/reports', '/settings', '/auth/logged-out']);
 
 export function isBrowserRoute(path: string): boolean {
+  if(path==='/management' || path.startsWith('/management/')){
+    const page=path.slice('/management'.length) || '/';
+    return routes.has(page) || /^\/staff\/[0-9a-f-]{36}$/i.test(page);
+  }
   const route = path === '/preview' ? '/' : path.startsWith('/preview/') ? path.slice(8) : path;
-  return routes.has(route) || /^\/staff\/[A-Za-z0-9_-]{1,128}$/.test(route);
+  return routes.has(route) || route==='/department' || /^\/staff\/[A-Za-z0-9_-]{1,128}$/.test(route) ||
+    /^\/department\/(operations|catalogue|security|support|finance|compliance)$/.test(route);
 }
 
 /** Read only known Vite outputs at startup. Request URLs never become filesystem paths. */

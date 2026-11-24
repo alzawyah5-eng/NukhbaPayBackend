@@ -9,10 +9,13 @@ export function readPendingAuth0Configuration(env:Readonly<Record<string,string|
   if(env['NUKHBAPAY_ENVIRONMENT']!=='development')throw new Error('Staff authentication configuration unavailable');
   try {
     const required=(name:string)=>{const value=env[name];if(!value)throw new Error();return value;};
+    const audienceMode=env['NUKHBAPAY_STAFF_AUTH0_ACCESS_TOKEN_AUDIENCE_MODE'] ?? 'api-only';
+    if(audienceMode!=='api-only' && audienceMode!=='api-and-userinfo')throw new Error();
     return validateAuth0Configuration({
       issuer:required('NUKHBAPAY_STAFF_AUTH0_ISSUER'),clientId:required('NUKHBAPAY_STAFF_AUTH0_CLIENT_ID'),
       clientSecret:required('NUKHBAPAY_STAFF_AUTH0_CLIENT_SECRET'),audience:required('NUKHBAPAY_STAFF_AUTH0_AUDIENCE'),
       staffKindClaim:required('NUKHBAPAY_STAFF_AUTH0_STAFF_KIND_CLAIM'),tenantId:required('NUKHBAPAY_STAFF_AUTH0_TENANT_ID'),
+      accessTokenAudienceMode:audienceMode,
       callbackUrl:STAFF_PORTAL_ORIGIN+'/auth/callback',
     });
   }catch{throw new Error('Staff authentication configuration unavailable');}

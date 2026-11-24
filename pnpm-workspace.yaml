@@ -3,6 +3,10 @@ packages:
   - 'apps/admin-web'
   - 'apps/worker'
   - 'packages/*'
+
 engineStrict: true
 packageManagerStrictVersion: true
 strictPeerDependencies: true
+
+overrides:
+  "node-pg-migrate>glob": "14.0.2"

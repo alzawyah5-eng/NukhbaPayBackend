@@ -1,3 +1,5 @@
+import { armCatalogueRefreshWrite, lockCatalogueAccount } from "../catalogue-refresh-write-fence.js";
+import type { RefreshClaim } from "@nukhbapay/application";
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 
@@ -277,10 +279,16 @@ export class CatalogPostgresRepository {
       };
   }
 
-  async importSyntheticSnapshot(
-    context: CatalogImportContext,
-    offers: readonly ProviderOffer[],
-  ): Promise<CatalogImportResult> {
+  async importSyntheticSnapshot(context: CatalogImportContext, offers: readonly ProviderOffer[]): Promise<CatalogImportResult> {
+    return this.#importSnapshot(context,offers);
+  }
+
+  async importFencedSnapshot(context: CatalogImportContext, offers: readonly ProviderOffer[], claim: RefreshClaim): Promise<CatalogImportResult> {
+    if (!claim) throw new Error("Refresh write fence required");
+    return this.#importSnapshot(context,offers,claim);
+  }
+
+  async #importSnapshot(context: CatalogImportContext, offers: readonly ProviderOffer[], claim?: RefreshClaim): Promise<CatalogImportResult> {
     const tenantId = assertIdentifier(context.tenantId, "tenantId");
     const providerAccountId = assertIdentifier(context.providerAccountId, "providerAccountId");
     const snapshotKey = assertIdentifier(context.snapshotKey, "snapshotKey");
@@ -323,9 +331,16 @@ export class CatalogPostgresRepository {
     }
 
     const client = await this.pool.connect();
-    let clientReleased = false;
+    let clientReleased = false, committing = false;
+    const commit = async () => {
+      committing = true;
+      if ((await client.query("COMMIT")).command !== "COMMIT") throw new Error("Catalogue import commit unresolved");
+      committing = false;
+    };
     try {
-      await client.query("BEGIN");
+      await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");
+      if (claim) await armCatalogueRefreshWrite(client, claim, { tenantId, providerAccountId, purpose: "IMPORT", resourceKey: snapshotKey });
+      await lockCatalogueAccount(client, tenantId, providerAccountId);
       const accountResult = await client.query<Record<string, unknown>>(
         `SELECT id, tenant_id, provider_code, status
          FROM nukhabapay.provider_accounts
@@ -429,7 +444,7 @@ export class CatalogPostgresRepository {
           if (!accepted) {
             throw new CatalogValidationError("Accepted snapshot is missing after duplicate detection");
           }
-          await client.query("COMMIT");
+          await commit();
           return {
             tenantId,
             providerAccountId,
@@ -576,7 +591,7 @@ export class CatalogPostgresRepository {
         [finalOfferCount, snapshotId],
       );
 
-      await client.query("COMMIT");
+      await commit();
       const accepted = await this.readSnapshotUsingClient(client, tenantId, providerAccountId, snapshotKey);
       if (!accepted) {
         throw new CatalogValidationError("Accepted snapshot was not persisted");
@@ -614,7 +629,7 @@ export class CatalogPostgresRepository {
       throw detail;
     } finally {
       if (!clientReleased) {
-        client.release();
+        client.release(committing);
       }
     }
   }

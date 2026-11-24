@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "environment": "development",
+  "tenantRef": null,
+  "custodianRef": null,
+  "reviewerRef": null,
+  "capturedAt": null,
+  "expiresAt": null,
+  "sections": {
+    "domain": { "recordRef": null, "ownership": "UNKNOWN", "reservation": "UNKNOWN", "claim": "https://claims.nukhbapay.com/principal", "value": "human" },
+    "actions": { "recordRef": null, "complete": null, "claimWritersReviewed": null, "libraryCount": null, "installedIntegrationCount": null, "bindings": [] },
+    "rules": { "recordRef": null, "kind": "UNKNOWN", "complete": null, "rules": [] },
+    "capabilities": {
+      "recordRef": null, "complete": null, "grantEscalationBlocked": null, "principals": [], "routes": [],
+      "recovery": { "immutableBinding": null, "nativeMfaRequired": null, "freshAuthRequired": null, "cutoffProcedure": null, "notifications": null }
+    },
+    "management": {
+      "recordRef": null, "complete": null, "dependenciesComplete": null, "defaultsReviewed": null, "supportedControl": null,
+      "userPolicy": "UNKNOWN", "clientPolicy": "UNKNOWN", "proposedUserPolicy": "UNKNOWN",
+      "tokenLifetimeSeconds": null, "refreshPathsReviewed": null, "defaultGrants": null, "applications": [], "grants": []
+    },
+    "mfa": { "recordRef": null, "complete": null, "administrators": [] },
+    "rollback": {
+      "recordRef": null, "adminAccessConfirmed": null, "priorPolicyPreserved": null, "priorBindingsPreserved": null,
+      "bindingsSnapshotSha256": null, "previousVersion": { "kind": "UNKNOWN", "sourceSha256": null, "versionRef": null, "artifactPreserved": null },
+      "stopOwnerAssigned": null, "windowApproved": null, "reopenBroadPolicyApproved": null, "tokenExposureReviewed": null
+    },
+    "release": {
+      "recordRef": null, "version": "STAFF_HUMAN_PRINCIPAL_DEV_V1", "runtime": "UNKNOWN",
+      "sourceSha256": null, "artifactSha256": null, "manifestSha256": null, "bindingsSnapshotSha256": null,
+      "configurationNames": ["NUKHBAPAY_STAFF_PORTAL_CLIENT_ID", "NUKHBAPAY_STAFF_DATABASE_CONNECTION_ID", "NUKHBAPAY_STAFF_API_AUDIENCE"],
+      "clientIdSha256": null, "connectionIdSha256": null, "audienceSha256": null,
+      "serverManaged": null, "mappingApproved": null, "executionValidated": null, "bindingOrderReviewed": null, "deploymentApprovalRef": null
+    }
+  }
+}

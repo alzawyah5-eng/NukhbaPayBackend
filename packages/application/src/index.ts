@@ -45,6 +45,8 @@ export type {
 export { recordSecurityAuditEvents } from "./identity/security-audit.js";
 export { readAuthorizedStaffSelf, StaffAccessUnavailableError } from "./identity/read-authorized-staff-self.js";
 export { planStaffLifecycle, proposeAccessRequestTransition, accessChangeRequestDigest } from "./identity/access-change-policy.js";
+export { preparePlatformStaffProposal, hasPlatformStaffProposalQuorum, isPlatformStaffProposalCurrent } from "./identity/platform-staff-proposal.js";
+export type { PlatformStaffProposal, PlatformStaffApprovalObservation, PlatformStaffCommitObservation } from "./identity/platform-staff-proposal.js";
 export { classifyLifecycleGrant, STAFF_LIFECYCLE_POLICY_VERSION, LIFECYCLE_EXECUTION_BLOCKERS } from "./identity/staff-lifecycle.js";
 export type {
   StaffLifecycleOperation, AccessChangeRequest, AccessRequestState, AccessRequestEvent, ApprovalSlot,
@@ -72,8 +74,10 @@ export type { StaffRequestCommand, StaffRequestResult, SyntheticStaffRequestStor
 export { consumeAuthorizedSyntheticReceiptQuery } from "./identity/trusted-staff-actor.js";
 export type { AuthorizedSyntheticReceiptQuery } from "./identity/trusted-staff-actor.js";
 export type { TrustedStaffActor, StaffApprovalObservation, ApprovalRequestSnapshot, SyntheticReceiptAcceptance, NonAuthorizedReceiptRow } from "./identity/trusted-staff-actor.js";
-export { StaffSessionLifecycle, consumeStaffSessionTicket, STAFF_SESSION_COOKIE, STAFF_SESSION_ABSOLUTE_MS, STAFF_SESSION_IDLE_MS } from "./identity/staff-session.js";
-export type { SessionBinding, StaffSessionTicket, StaffSessionStore, SessionStoreOutcome } from "./identity/staff-session.js";
+export { StaffSessionLifecycle, consumeStaffSessionTicket, consumeStaffSessionHistoryTicket,
+  STAFF_SESSION_COOKIE, STAFF_SESSION_ABSOLUTE_MS, STAFF_SESSION_IDLE_MS } from "./identity/staff-session.js";
+export type { SessionBinding, StaffSessionTicket, StaffSessionStore, SessionStoreOutcome,
+  StaffSessionHistoryTicket, StaffSessionHistoryEntry } from "./identity/staff-session.js";
 export type {
   SecurityAuditAction,
   SecurityAuditEvent,
@@ -86,8 +90,25 @@ export type {
 export { prepareSyntheticPriceSubmission, consumeSubmissionEvidence, submissionDigest, SUBMISSION_CANONICALIZATION, PUBLICATION_PERMISSION_CONTRACTS } from "./catalog/submission-evidence.js";
 export type { SubmissionEvidence } from "./catalog/submission-evidence.js";
 
-export { prepareSyntheticPublicationCommand, consumePublicationCommand, independentlyVerifyPublicationPayload } from "./catalog/publication-workflow.js";
+export { prepareSyntheticPublicationCommand, inspectSyntheticPublicationCommand, normalizePublicationCommand, consumePublicationCommand, independentlyVerifyPublicationPayload } from "./catalog/publication-workflow.js";
 export type { PublicationAction, PublicationCommand, PublicationCommandTicket, SyntheticPublicationAuthority, SyntheticPublicationPermission } from "./catalog/publication-workflow.js";
 
 export { PublishedCatalogueService, CatalogueAccessError, attestCatalogueClient, consumeCatalogueReadTicket, CATALOGUE_AUDIENCES, CATALOGUE_SCOPES } from "./catalog/published-catalogue.js";
 export type { CatalogueClientKind, CatalogueClientIdentity, CatalogueClientBinding, CatalogueBindingRepository, CatalogueRow, CatalogueReadTicket, CatalogueReader, CatalogueReadAudit, CatalogueAuditWriter, PublicCatalogueProduct, PublishedCataloguePage } from "./catalog/published-catalogue.js";
+export * from "./catalog/ai-jobs.js";
+export * from "./catalog/bounded-ai-admission.js";
+export * from "./catalog/ai-control-policy.js";
+export * from "./catalog/ai-outbox.js";
+
+export {validateAiSummary} from "./catalog/ai-jobs.js";
+export {ScheduledCatalogRefresh,CatalogRefreshError,CatalogRefreshReadUnavailable} from "./catalog/refresh-schedule.js";
+export type {CatalogRefreshSchedule} from "./catalog/refresh-schedule.js";
+export * from './administration/access.js';
+export * from './administration/staff-management.js';
+export * from './catalog/staff-catalogue.js';
+export * from './catalog/catalogue-geography.js';
+
+export * from './catalog/durable-refresh.js';
+
+export * from './administration/composition.js';
+export * from './administration/staff-workspace.js';

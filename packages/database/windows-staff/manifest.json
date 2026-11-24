@@ -1,0 +1,5 @@
+{
+  "packages/database/windows-staff/001_foundation.sql": "12109cf14c55b95666ac124d6ade317e70861866f096588390994a79b145c676",
+  "packages/database/windows-staff/001_portal.sql": "1fafe41854ece1d42937ad50ce975f7bb3e7650fdb614fdb1160fba7f1a0b57a",
+  "scripts/windows-staff-empty.sql": "1e48c386117952a0a68976c98353380f2498f021d2afda5196f648342ccd6409"
+}

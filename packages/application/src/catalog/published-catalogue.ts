@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { CATALOGUE_COUNTRIES } from "./catalogue-geography.js";
 import { formatAed } from "../../../domain/src/index.js";
 export type CatalogueClientKind="payment"|"kiosk";
 export const CATALOGUE_AUDIENCES=Object.freeze({payment:"urn:nukhbapay:synthetic:payment-catalogue",kiosk:"urn:nukhbapay:synthetic:kiosk-catalogue"});
@@ -23,7 +24,7 @@ export interface PublicCatalogueProduct {readonly product_id:string;readonly nam
 export interface PublishedCataloguePage {readonly catalogue_version:string;readonly items:readonly PublicCatalogueProduct[];readonly next_cursor:string|null;}
 /** Fail-closed, fixture-only composition; no browser enrollment, environment toggle or operational client registry. */
 export class PublishedCatalogueService {
- readonly #cursors=new Map<string,{binding:string;version:string;after:string;limit:number;expires:number}>();
+ readonly #cursors=new Map<string,{binding:string;version:string;filter:string;after:string;limit:number;expires:number}>();
  readonly #rates=new Map<string,{start:number;count:number}>();
  constructor(private readonly deps:{capability:"SYNTHETIC_PUBLISHED_CATALOGUE_ONLY";bindings:CatalogueBindingRepository;reader:CatalogueReader;audit:CatalogueAuditWriter;now:()=>Date;requestsPerMinute?:number}){
   if(deps.capability!=="SYNTHETIC_PUBLISHED_CATALOGUE_ONLY"||!Number.isSafeInteger(deps.requestsPerMinute??60)||(deps.requestsPerMinute??60)<1||(deps.requestsPerMinute??60)>200)throw new Error("Invalid catalogue composition");
@@ -38,6 +39,8 @@ export class PublishedCatalogueService {
    const now=clock();
    if(!Number.isSafeInteger(identity.issuedAt)||!Number.isSafeInteger(identity.expiresAt)||now<identity.issuedAt*1000||now>=identity.expiresAt*1000||identity.kind!==input.kind||identity.audience!==CATALOGUE_AUDIENCES[input.kind]||!new URL(identity.issuer).hostname.endsWith(".invalid"))throw new CatalogueAccessError(401);
    const b=await this.deps.bindings.find(identity);
+   // Repository latency cannot extend a signed credential's lifetime.
+   if(clock()<identity.issuedAt*1000||clock()>=identity.expiresAt*1000)throw new CatalogueAccessError(401);
    if(!b||!b.enabled||b.issuer!==identity.issuer||b.subject!==identity.subject||b.clientId!==identity.clientId||b.kind!==input.kind||!uuid.test(b.tenantId)||!/^([1-9][0-9]{0,18})$/.test(b.version)||
     identity.scope!==CATALOGUE_SCOPES[input.kind]||b.scope!==CATALOGUE_SCOPES[input.kind]||
     (input.kind==="payment"?(b.kioskId!==null||input.kioskId!==undefined):(!b.kioskId||!uuid.test(b.kioskId)||b.kioskId!==input.kioskId)))throw new CatalogueAccessError(403);
@@ -48,12 +51,18 @@ export class PublishedCatalogueService {
   let rate=this.#rates.get(clientKey);if(!rate){if(this.#rates.size>=1000)throw new CatalogueAccessError(503);rate={start:now,count:0};this.#rates.set(clientKey,rate);}
   if(++rate.count>(this.deps.requestsPerMinute??60))throw new CatalogueAccessError(429);
   const q=input.query;
-  if(Object.keys(q).some(k=>k!=="limit"&&k!=="cursor")||(input.productId!==undefined&&(!uuid.test(input.productId)||Object.keys(q).length!==0)))throw new CatalogueAccessError(400);
+  if(Object.keys(q).some(k=>!["limit","cursor","search","country","region","service"].includes(k))||(input.productId!==undefined&&(!uuid.test(input.productId)||Object.keys(q).length!==0)))throw new CatalogueAccessError(400);
+  const filterText=(key:string,pattern:RegExp)=>{const value=q[key];if(value===undefined)return undefined;if(typeof value!=="string"||value.trim()!==value||!pattern.test(value))throw new CatalogueAccessError(400);return value;};
+  const country=filterText("country",/^[A-Z]{2}$/),region=filterText("region",/^[A-Z][A-Z0-9_-]{1,31}$/),service=filterText("service",/^[A-Z][A-Z0-9_]{1,31}$/);
+  const rawSearch=q["search"];
+  if(rawSearch!==undefined&&(typeof rawSearch!=="string"||rawSearch.length<1||rawSearch.length>128||/[\u0000-\u001f\u007f]/.test(rawSearch)||!rawSearch.trim()))throw new CatalogueAccessError(400);
+  const search=typeof rawSearch==="string"?rawSearch.normalize("NFKC").toLowerCase().trim():undefined;
+  const filter=hash([country??null,region??null,service??null,search??null]);
   const limit=q["limit"]===undefined?20:typeof q["limit"]==="string"&&/^[1-9][0-9]?$/.test(q["limit"])?Number(q["limit"]):0;
   if(limit<1||limit>50)throw new CatalogueAccessError(400);
   if(q["cursor"]!==undefined&&(typeof q["cursor"]!=="string"||!/^([0-9a-f]{64})$/.test(q["cursor"])))throw new CatalogueAccessError(400);
   const continuation=typeof q["cursor"]==="string"?this.#cursors.get(q["cursor"]):undefined;
-  if(q["cursor"]!==undefined){if(!continuation||continuation.binding!==bindingStamp||continuation.limit!==limit||now>=continuation.expires)throw new CatalogueAccessError(409);this.#cursors.delete(q["cursor"] as string);}
+  if(q["cursor"]!==undefined){if(!continuation||continuation.binding!==bindingStamp||continuation.filter!==filter||continuation.limit!==limit||now>=continuation.expires)throw new CatalogueAccessError(409);this.#cursors.delete(q["cursor"] as string);}
   const fresh=async()=>{try{return hash(await resolve())===bindingStamp;}catch{return false;}};
   const ticket=Object.freeze({tenantId:binding.tenantId,nowMs:now,revalidate:fresh});tickets.add(ticket);
   let rows:readonly CatalogueRow[];try{rows=await this.deps.reader.read(ticket);}finally{tickets.delete(ticket);}
@@ -66,7 +75,13 @@ export class PublishedCatalogueService {
   if(new Set(safe.map(r=>r.product_id)).size!==safe.length)throw new CatalogueAccessError(503);
   const version=hash(safe);
   if(continuation&&continuation.version!==version)throw new CatalogueAccessError(409);
-  const visible=input.productId?safe.filter(r=>r.product_id===input.productId):safe.filter(r=>!continuation||r.product_id>continuation.after);
+  // Existing published contracts support AE digital PINs only. Unsupported
+  // destinations/services produce no availability; they never widen the catalogue.
+  const publishedCountry = CATALOGUE_COUNTRIES.find(candidate => candidate.code === "AE")!;
+  const regions = [publishedCountry.code, publishedCountry.group, publishedCountry.continent.toUpperCase()];
+  const available = (country === undefined || country === publishedCountry.code) &&
+    (region === undefined || regions.includes(region)) && (service === undefined || service === "DIGITAL_PIN");
+  const visible=input.productId?safe.filter(r=>r.product_id===input.productId):safe.filter(r=>available&&(!search||r.name.normalize("NFKC").toLowerCase().includes(search))&&(!continuation||r.product_id>continuation.after));
   if(input.productId&&visible.length===0)throw new CatalogueAccessError(404);
   const items=Object.freeze(visible.slice(0,limit));
   if(!await fresh())throw new CatalogueAccessError(403);
@@ -74,7 +89,7 @@ export class PublishedCatalogueService {
   if(!await fresh()||rows.some(r=>Date.parse(r.validUntil)<=clock()))throw new CatalogueAccessError(403);
   let next:string|null=null;
   for(const [key,c] of this.#cursors)if(clock()>=c.expires)this.#cursors.delete(key);
-  if(visible.length>limit){if(this.#cursors.size>=1000)throw new CatalogueAccessError(503);next=randomBytes(32).toString("hex");this.#cursors.set(next,{binding:bindingStamp,version,after:items.at(-1)!.product_id,limit,expires:Math.min(now+60000,identity.expiresAt*1000)});}
+  if(visible.length>limit){if(this.#cursors.size>=1000)throw new CatalogueAccessError(503);next=randomBytes(32).toString("hex");this.#cursors.set(next,{binding:bindingStamp,version,filter,after:items.at(-1)!.product_id,limit,expires:Math.min(now+60000,identity.expiresAt*1000)});}
   return Object.freeze({catalogue_version:version,items,next_cursor:next});
  }
 }

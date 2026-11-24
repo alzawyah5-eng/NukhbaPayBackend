@@ -1,8 +1,8 @@
 import { Pool, type PoolClient } from "pg";
 import { consumeAuthorizedStaffRequest, canonicalDigest, staffAuthorityDigest, staffRequestResult, accessChangeRequestDigest,
-  planStaffLifecycle, authorizeStaffAccess, STAFF_LIFECYCLE_POLICY_VERSION,
+  planStaffLifecycle, prepareStaffCommand, classifyLifecycleGrant, authorizeStaffAccess, STAFF_LIFECYCLE_POLICY_VERSION,
   type AuthorizedStaffRequest, type StaffRequestResult, type AccessChangeRequest, type LifecycleActor, type LifecycleTarget,
-  type LifecycleGrant, type StaffAuthorizationContext, type StaffRoleGrant } from "@nukhbapay/application";
+  type LifecycleApproval, type LifecycleGrant, type StaffAuthorizationContext, type StaffRoleGrant } from "@nukhbapay/application";
 
 class Rejected extends Error { constructor(readonly reason: string) { super("Synthetic staff request rejected"); } }
 const baseTables=["staff_request_operations","staff_access_requests","staff_review_observations","staff_request_audit","staff_request_receipts","staff_request_outbox"];
@@ -11,15 +11,17 @@ const ms=(value:Date|string)=>new Date(value).getTime();
 const iso=(value:Date|string)=>new Date(value).toISOString();
 
 /** Explicit disposable-target store. No staff mutation, permission activation or runtime registration. */
-export async function createDurableStaffRequestStore(input: Readonly<{connectionString:string;expectedRole:string;expectedDatabase:string;syntheticProvenance?:"LOCAL_SYNTHETIC_ONLY"}>) {
-  const {connectionString,expectedRole,expectedDatabase,syntheticProvenance}=input;
-  const tables=syntheticProvenance==="LOCAL_SYNTHETIC_ONLY"?[...baseTables,"staff_synthetic_provenance"]:baseTables;
+export async function createDurableStaffRequestStore(input: Readonly<{connectionString:string;expectedRole:string;expectedDatabase:string;syntheticProvenance?:"LOCAL_SYNTHETIC_ONLY";decisionRehearsal?:"LOCAL_SYNTHETIC_ONLY";requestCancellation?:"LOCAL_SYNTHETIC_ONLY"}>) {
+  const {connectionString,expectedRole,expectedDatabase,syntheticProvenance,decisionRehearsal,requestCancellation}=input;
+  const tables=syntheticProvenance==="LOCAL_SYNTHETIC_ONLY"?[...baseTables,"staff_synthetic_provenance"]: [...baseTables];
+  if(decisionRehearsal==="LOCAL_SYNTHETIC_ONLY")tables.push("staff_rehearsal_decisions","staff_execution_rehearsals");
+  if(requestCancellation==="LOCAL_SYNTHETIC_ONLY") tables.push("staff_request_cancellations");
   let endpoint="";
   let pool:Pool|undefined;
   const failed=new WeakSet<PoolClient>();
   try {
     const url=new URL(connectionString);
-    if((syntheticProvenance!==undefined && syntheticProvenance!=="LOCAL_SYNTHETIC_ONLY") || url.protocol!=="postgresql:" || url.hostname!=="127.0.0.1" || url.search || url.hash || !url.password ||
+    if((requestCancellation!==undefined && (requestCancellation!=="LOCAL_SYNTHETIC_ONLY" || decisionRehearsal!=="LOCAL_SYNTHETIC_ONLY")) || (decisionRehearsal!==undefined && (decisionRehearsal!=="LOCAL_SYNTHETIC_ONLY" || syntheticProvenance!=="LOCAL_SYNTHETIC_ONLY")) || (syntheticProvenance!==undefined && syntheticProvenance!=="LOCAL_SYNTHETIC_ONLY") || url.protocol!=="postgresql:" || url.hostname!=="127.0.0.1" || url.search || url.hash || !url.password ||
       decodeURIComponent(url.username)!==expectedRole || !/^nukh_request_[0-9a-f]{20}$/.test(expectedRole) ||
       !/^nukhabapay_b3b3_[0-9a-f]{32}$/.test(expectedDatabase) || url.pathname!=="/"+expectedDatabase ||
       !Number.isInteger(Number(url.port||5432)) || Number(url.port||5432)<1 || Number(url.port||5432)>65535) throw new Error();
@@ -76,7 +78,8 @@ export async function createDurableStaffRequestStore(input: Readonly<{connection
   function decode(payload:AccessChangeRequest):AccessChangeRequest {
     return {...payload,version:BigInt(payload.version),expectedAuthzVersion:BigInt(payload.expectedAuthzVersion),expectedMembershipVersion:payload.expectedMembershipVersion===null?null:BigInt(payload.expectedMembershipVersion)};
   }
-  async function finalSnapshots(ticket:AuthorizedStaffRequest,request:AccessChangeRequest,targetDigest:string,requesterDigest:string,requesterIdentity:{issuer:string;subject:string}){
+  async function finalSnapshots(ticket:AuthorizedStaffRequest,request:AccessChangeRequest,targetDigest:string,requesterDigest:string,requesterIdentity:{issuer:string;subject:string},
+    reviewers:readonly {id:string;issuer:string;subject:string;digest:string}[]=[]){
     const live=await freshness.connect();let broken:Error|undefined;
     try{
       await live.query("BEGIN READ ONLY");
@@ -84,14 +87,107 @@ export async function createDurableStaffRequestStore(input: Readonly<{connection
       if(staffAuthorityDigest((await snapshot(live,ticket.staffId,ticket.tenantId,ticket)).context)!==ticket.authorityDigest)throw new Rejected("STALE_AUTHORITY");
       if(staffAuthorityDigest((await snapshot(live,request.targetStaffId,ticket.tenantId)).context)!==targetDigest)throw new Rejected("STALE_TARGET");
       if(staffAuthorityDigest((await snapshot(live,request.requesterStaffId,ticket.tenantId,requesterIdentity)).context)!==requesterDigest)throw new Rejected("STALE_REQUESTER");
+      for (const reviewer of reviewers) {
+        if(staffAuthorityDigest((await snapshot(live,reviewer.id,null,reviewer)).context)!==reviewer.digest)throw new Rejected("STALE_REVIEWER");
+      }
       const ack=await live.query("COMMIT");if(ack.command!=="COMMIT" || failed.has(live))throw new Error("Freshness unavailable");
     }catch(error){try{await live.query("ROLLBACK");}catch{broken=new Error("Freshness connection discarded");}throw error;}
     finally{live.release(broken);}
+  }
+  async function checkCancellation(c: PoolClient, ticket: AuthorizedStaffRequest, scope: string, operationId: string) {
+    const cmd = ticket.command;
+    const records = (await c.query(`SELECT request_id,request_version,request_digest,requester_staff_id,operation_id
+      FROM nukhabapay.staff_request_cancellations
+      WHERE scope_key=$2 AND (request_id=$1 OR (requester_staff_id=$3 AND idempotency_key=$4))`,
+    [cmd.id, scope, ticket.staffId, cmd.key])).rows;
+    const cancellation = records.find(record => record.request_id === cmd.id);
+    if (cmd.kind === "LOOKUP") return;
+    if (records.some(record => record.request_id !== cmd.id)) throw new Rejected("IDEMPOTENCY_CONFLICT");
+    if (cancellation && cmd.kind !== "CANCEL") throw new Rejected("REQUEST_CANCELLED");
+    if (cancellation) {
+      if (cancellation.requester_staff_id !== ticket.staffId || cancellation.operation_id !== operationId ||
+          BigInt(cancellation.request_version) !== cmd.version ||
+          cmd.kind !== "CANCEL" || cancellation.request_digest !== cmd.requestDigest) throw new Rejected("REQUEST_CANCELLED");
+      return { kind: "REPLAYED", expiresAtMs: undefined } as const;
+    }
+    if (cmd.kind !== "CANCEL") return;
+    const head = (await c.query(`SELECT version,request_digest,requester_staff_id,target_staff_id,expires_at_ms
+      FROM nukhabapay.staff_access_requests WHERE request_id=$1 AND scope_key=$2 ORDER BY version DESC LIMIT 1`,
+    [cmd.id, scope])).rows[0];
+    if (!head || head.requester_staff_id !== ticket.staffId || BigInt(head.version) !== cmd.version ||
+        head.request_digest !== cmd.requestDigest || !await ticket.revalidate(Number(head.expires_at_ms)))
+      throw new Rejected("STALE_REQUEST");
+    const occupied = (await c.query(`SELECT 1 FROM nukhabapay.staff_execution_rehearsals WHERE request_id=$1
+      UNION ALL SELECT 1 FROM nukhabapay.staff_request_operations WHERE actor_staff_id=$2 AND idempotency_key=$3`,
+    [cmd.id, ticket.staffId, cmd.key])).rowCount;
+    if (occupied) throw new Rejected("IDEMPOTENCY_CONFLICT");
+    await c.query(`INSERT INTO nukhabapay.staff_request_cancellations(request_id,request_version,request_digest,
+      requester_staff_id,target_staff_id,scope_key,operation_id,idempotency_key,cancelled_at_ms)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [cmd.id, cmd.version.toString(), cmd.requestDigest, ticket.staffId,
+      head.target_staff_id, scope, operationId, cmd.key, ticket.nowMs]);
+    if (!await ticket.revalidate(Number(head.expires_at_ms))) throw new Rejected("STALE_AUTHORITY");
+    return { kind: "RECORDED", expiresAtMs: Number(head.expires_at_ms) } as const;
+  }
+
+  async function rehearse(c:PoolClient,ticket:AuthorizedStaffRequest,requester:LifecycleActor,operationId:string) {
+    const cmd=ticket.command;
+    if (cmd.kind!=="REVIEW" || ticket.tenantId!==null) throw new Rejected("EXECUTION_REHEARSAL_DENIED");
+    const head=(await c.query(`SELECT payload,request_digest,requester_authority_digest,target_authority_digest
+      FROM nukhabapay.staff_access_requests WHERE request_id=$1 AND scope_key='PLATFORM'
+      ORDER BY version DESC LIMIT 1`,[cmd.id])).rows[0];
+    if (!head || head.request_digest!==cmd.requestDigest) throw new Rejected("STALE_REQUEST");
+    const request=decode(head.payload);
+    if(request.state!=="SUBMITTED"||request.version!==cmd.version||request.requesterStaffId!==ticket.staffId||
+      request.scope.kind!=="PLATFORM"||accessChangeRequestDigest(request)!==cmd.requestDigest||
+      head.requester_authority_digest!==ticket.authorityDigest) throw new Rejected("STALE_REQUEST");
+    const target=await snapshot(c,request.targetStaffId,null);
+    if(staffAuthorityDigest(target.context)!==head.target_authority_digest) throw new Rejected("STALE_TARGET");
+
+    const rows=(await c.query(`SELECT d.slot,d.decision,p.reviewer_staff_id,p.identity_issuer,p.identity_subject,p.authority_digest,
+      p.expires_at_ms,v.observed_at_ms,v.reviewer_authz_version
+      FROM nukhabapay.staff_rehearsal_decisions d
+      JOIN nukhabapay.staff_synthetic_provenance p USING(operation_id,scope_key)
+      JOIN nukhabapay.staff_review_observations v USING(operation_id)
+      WHERE d.scope_key='PLATFORM' AND p.request_id=$1 AND p.request_version=$2 AND p.request_digest=$3
+      ORDER BY d.slot,d.operation_id LIMIT 3`,[cmd.id,cmd.version.toString(),cmd.requestDigest])).rows;
+    const approvals:LifecycleApproval[]=[];
+    const approvers:LifecycleActor[]=[];
+    const reviewers=[];
+    for(const row of rows){
+      const proof={id:row.reviewer_staff_id as string,issuer:row.identity_issuer as string,subject:row.identity_subject as string,digest:row.authority_digest as string};
+      const reviewer=await snapshot(c,proof.id,null,proof);
+      if(staffAuthorityDigest(reviewer.context)!==proof.digest) throw new Rejected("STALE_REVIEWER");
+      reviewers.push(proof);approvers.push(reviewer.actor);
+      approvals.push({slot:row.slot,decision:row.decision,approverStaffId:proof.id,approverAuthzVersion:BigInt(row.reviewer_authz_version),
+        decidedAtMs:Number(row.observed_at_ms),expiresAtMs:Number(row.expires_at_ms),
+        requestId:cmd.id,requestVersion:cmd.version,requestDigest:cmd.requestDigest,policyVersion:request.policyVersion});
+    }
+    const policy={currentRequestVersion:cmd.version,currentRequestDigest:cmd.requestDigest,
+      requester,target:target.target,approvers,approvals,objectTenantId:null,knownTenantIds:[]};
+    const plan=planStaffLifecycle(request,policy,ticket.nowMs);
+    const prepared=prepareStaffCommand(request,policy,cmd.key,ticket.nowMs);
+    if(plan.kind!=="PLAN"||plan.quorum!=="PRESENT"||prepared.kind!=="CANDIDATE")throw new Rejected("QUORUM_OR_POLICY_DENIED");
+    const limit=Math.min(request.expiresAtMs,...approvals.map(row=>row.expiresAtMs));
+    const prior=(await c.query(`SELECT operation_id,command_digest FROM nukhabapay.staff_execution_rehearsals
+      WHERE (request_id=$1 AND request_version=$2) OR (actor_staff_id=$3 AND idempotency_key=$4)`,
+      [cmd.id,cmd.version.toString(),ticket.staffId,cmd.key])).rows;
+    if(prior.length>0 && (prior.length!==1||prior[0].operation_id!==operationId||prior[0].command_digest!==prepared.command.commandDigest))
+      throw new Rejected("IDEMPOTENCY_CONFLICT");
+    if(prior.length===0)await c.query(`INSERT INTO nukhabapay.staff_execution_rehearsals
+      (operation_id,actor_staff_id,target_staff_id,idempotency_key,request_id,request_version,request_digest,scope_key,approval_digest,command_digest,recorded_at_ms)
+      VALUES($1,$2,$3,$4,$5,$6,$7,'PLATFORM',$8,$9,$10)`,[operationId,ticket.staffId,request.targetStaffId,cmd.key,
+      cmd.id,cmd.version.toString(),cmd.requestDigest,prepared.command.approvalDigest,prepared.command.commandDigest,ticket.nowMs]);
+    await finalSnapshots(ticket,request,head.target_authority_digest,head.requester_authority_digest,ticket,reviewers);
+    if(!await ticket.revalidate(limit))throw new Rejected("STALE_AUTHORITY");
+    return {result:staffRequestResult(prior.length?"REPLAYED":"RECORDED",{operationId,requestId:cmd.id,
+      version:cmd.version.toString(),requestDigest:cmd.requestDigest}),limit};
   }
   return Object.freeze({close,
     async execute(ticket:AuthorizedStaffRequest):Promise<StaffRequestResult>{
       if(!consumeAuthorizedStaffRequest(ticket) || closing)return staffRequestResult("DENIED",{reason:"UNTRUSTED_REQUEST"});
       const cmd=ticket.command,scope=ticket.tenantId??"PLATFORM";
+      if (cmd.kind === "CANCEL" && requestCancellation !== "LOCAL_SYNTHETIC_ONLY")
+        return staffRequestResult("DENIED", { reason: "CANCELLATION_DISABLED" });
       const proof=ticket.syntheticProvenance;
       const intake=ticket.approvalIntake;
       if(intake && (syntheticProvenance!=="LOCAL_SYNTHETIC_ONLY" || intake.profile!=="BLOCKED_SYNTHETIC_REVIEW" || intake.policyVersion!==STAFF_LIFECYCLE_POLICY_VERSION ||
@@ -101,7 +197,12 @@ export async function createDurableStaffRequestStore(input: Readonly<{connection
         proof.binding.identitySubject!==ticket.subject || proof.binding.requestId!==cmd.id || proof.binding.requestVersion!==cmd.version.toString() || proof.binding.tenantId!==ticket.tenantId ||
         proof.binding.authorityDigest!==ticket.authorityDigest || proof.binding.requestDigest!==cmd.requestDigest || proof.operationalAssurance!=="not-established" || proof.acceptedApproval!==false || proof.execution!=="NOT_AUTHORIZED"))
         return staffRequestResult("DENIED",{reason:"UNTRUSTED_SYNTHETIC_PROVENANCE"});
-      const operationId=canonicalDigest(["staff-request-operation-v1",ticket.staffId,cmd.key]);
+      if((intake?.decision || ticket.executionRehearsal) && decisionRehearsal!=="LOCAL_SYNTHETIC_ONLY")
+        return staffRequestResult("DENIED",{reason:"DECISION_REHEARSAL_DISABLED"});
+      if(proof?.binding.decision!==intake?.decision || intake?.decision && ticket.tenantId!==null)
+        return staffRequestResult("DENIED",{reason:"DECISION_BINDING_INVALID"});
+      const operationId=canonicalDigest([ticket.executionRehearsal?"staff-execution-rehearsal-v1":
+        cmd.kind==="CANCEL"?"staff-request-cancellation-v1":"staff-request-operation-v1",ticket.staffId,cmd.key]);
       const intent=canonicalDigest(proof?[ticket.staffId,scope,cmd,proof.recordDigest]:[ticket.staffId,scope,cmd]);
       for(let attempt=0;attempt<3;attempt++){
         let c:PoolClient|undefined,broken:Error|undefined,committing=false;
@@ -120,6 +221,23 @@ export async function createDurableStaffRequestStore(input: Readonly<{connection
           const current=await snapshot(c,ticket.staffId,ticket.tenantId,{issuer:ticket.issuer,subject:ticket.subject});
           if(!current.context.principal || current.context.principal.staffStatus!=="ACTIVE" || current.context.principal.identityStatus!=="ACTIVE" ||
             staffAuthorityDigest(current.context)!==ticket.authorityDigest)throw new Rejected("STALE_AUTHORITY");
+          const cancellation = requestCancellation === "LOCAL_SYNTHETIC_ONLY"
+            ? await checkCancellation(c, ticket, scope, operationId) : undefined;
+          if (cmd.kind === "CANCEL") {
+            if (!cancellation || !await ticket.revalidate(cancellation.expiresAtMs)) throw new Rejected("STALE_AUTHORITY");
+            committing = true;
+            const ack = await c.query("COMMIT");
+            if (ack.command !== "COMMIT" || failed.has(c) || !await ticket.revalidate(cancellation.expiresAtMs))
+              return staffRequestResult("UNRESOLVED", { operationId });
+            return staffRequestResult(cancellation.kind, { operationId, requestId: cmd.id, version: cmd.version.toString(), requestDigest: cmd.requestDigest });
+          }
+          if(ticket.executionRehearsal){
+            const {result,limit}=await rehearse(c,ticket,current.actor,operationId);
+            committing=true;
+            const ack=await c.query("COMMIT");
+            if(ack.command!=="COMMIT" || failed.has(c)){broken=new Error("Uncertain execution rehearsal");return staffRequestResult("UNRESOLVED");}
+            return await ticket.revalidate(limit)?result:staffRequestResult("UNRESOLVED");
+          }
           const prior=(await c.query(`SELECT o.intent_digest,o.request_id,o.request_version,r.request_digest${intake?",o.kind,o.synthetic_provenance_id":""} FROM nukhabapay.staff_request_operations o
             JOIN nukhabapay.staff_request_receipts s ON s.operation_id=o.operation_id JOIN nukhabapay.staff_access_requests r ON r.request_id=o.request_id AND r.version=o.request_version
             WHERE o.actor_staff_id=$1 AND o.idempotency_key=$2 AND o.scope_key=$3`,[ticket.staffId,cmd.key,scope])).rows[0];
@@ -134,6 +252,8 @@ export async function createDurableStaffRequestStore(input: Readonly<{connection
                 AND NOT v.accepted_approval AND v.assurance='not-established' AND v.execution='NOT_AUTHORIZED'`,
                 [operationId,ticket.staffId,cmd.id,cmd.version.toString(),scope,intake.requestDigest,intake.policyVersion]);
               if(classified.rowCount!==1)throw new Rejected("INTAKE_RECEIPT_MISMATCH");
+              if(intake.decision && (await c.query("SELECT 1 FROM nukhabapay.staff_rehearsal_decisions WHERE operation_id=$1 AND decision=$2",
+                [operationId,intake.decision])).rowCount!==1)throw new Rejected("INTAKE_RECEIPT_MISMATCH");
             }
             if(!await ticket.revalidate())throw new Rejected("STALE_AUTHORITY");
             committing=true;const ack=await c.query("COMMIT");
@@ -182,17 +302,26 @@ export async function createDurableStaffRequestStore(input: Readonly<{connection
             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19::jsonb)`,[operationId,cmd.id,cmd.version.toString(),ticket.staffId,ticket.issuer,ticket.subject,scope,
             proof.binding.requestDigest,proof.binding.authorityDigest,proof.binding.policyVersion,proof.challengeId,proof.authenticationEventId,proof.providerIssuer,proof.signingKeyId,
             proof.authenticatedAtMs,proof.expiresAtMs,proof.assertionDigest,proof.recordDigest,json(proof.binding)]);
+          if(intake?.decision){
+            const slots=plan.requiredApprovals.filter(slot=>current.actor.grants.some(grant=>
+              grant.scope.kind==="PLATFORM" && grant.roleCode===slot && classifyLifecycleGrant(grant,ticket.nowMs)==="ACTIVE"));
+            if(slots.length!==1)throw new Rejected("DECISION_ROLE_NOT_REQUIRED");
+            await c.query("INSERT INTO nukhabapay.staff_rehearsal_decisions(operation_id,scope_key,request_id,request_version,slot,decision) VALUES($1,$2,$3,$4,$5,$6)",
+              [operationId,scope,cmd.id,cmd.version.toString(),slots[0],intake.decision]);
+          }
           await c.query(`INSERT INTO nukhabapay.staff_request_audit(operation_id,actor_staff_id,request_id,request_version,scope_key,intent_digest,event_name)
             VALUES($1,$2,$3,$4,$5,$6,$7)`,[operationId,ticket.staffId,cmd.id,cmd.version.toString(),scope,intent,cmd.kind==="SUBMIT"?"SYNTHETIC_REQUEST_SUBMITTED":"SYNTHETIC_REVIEW_OBSERVED"]);
           await c.query("INSERT INTO nukhabapay.staff_request_receipts(operation_id,scope_key,outcome) VALUES($1,$2,'RECORDED_NOT_AUTHORIZED')",[operationId,scope]);
           await c.query("INSERT INTO nukhabapay.staff_request_outbox(operation_id,scope_key) VALUES($1,$2)",[operationId,scope]);
           if(!await ticket.revalidate())throw new Rejected("STALE_AUTHORITY");
           await finalSnapshots(ticket,request,staffAuthorityDigest(target.context),staffAuthorityDigest(requester.context),submission??ticket);
+          if(!await ticket.revalidate())throw new Rejected("STALE_AUTHORITY");
           committing=true;
           const ack=await c.query("COMMIT");
           if(ack.command!=="COMMIT" || failed.has(c))return staffRequestResult("UNRESOLVED",{operationId});
           return staffRequestResult("RECORDED",{operationId,requestId:cmd.id,version:cmd.version.toString(),requestDigest});
         }catch(error){
+          if(committing)broken=new Error("Request commit acknowledgement failed");
           if(c){try{await c.query("ROLLBACK");}catch{broken=new Error("Request connection discarded");}}
           const code=typeof error==="object"&&error!==null&&"code" in error?String(error.code):"";
           if(["40001","40P01","23505"].includes(code) && attempt<2)continue;

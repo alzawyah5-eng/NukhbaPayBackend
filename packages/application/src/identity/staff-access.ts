@@ -229,6 +229,53 @@ export function authorizeStaffAccess(
   context: StaffAuthorizationContext | null | undefined,
   request: StaffAuthorizationRequest | null | undefined,
 ): StaffAuthorizationDecision {
+  return evaluateStaffAccess(context, request);
+}
+
+export interface IsolatedStaffReadScope {
+  readonly staffId: string;
+  readonly tenantId: string;
+}
+
+/** Explicit local test composition for the enrolled viewer and the two management reads. */
+export function authorizeIsolatedStaffRead(
+  context: StaffAuthorizationContext,
+  request: StaffAuthorizationRequest,
+  scope: IsolatedStaffReadScope,
+): StaffAuthorizationDecision {
+  if (request.scope !== "TENANT" || request.tenantId !== scope.tenantId ||
+      context.principal?.staffId !== scope.staffId ||
+      !["tenant.staff.read", "tenant.audit.read"].includes(request.permissionCode)) {
+    return deny("SCOPE_MISMATCH");
+  }
+  return evaluateStaffAccess(context, request, ["TENANT_STAFF_VIEWER"]);
+}
+
+/** Opt-in local workspace permissions. Catalogue and privileged IAM commands retain their original gates. */
+export function authorizeIsolatedTenantWorkspace(
+  context: StaffAuthorizationContext,
+  request: StaffAuthorizationRequest,
+  tenantId: string,
+): StaffAuthorizationDecision {
+  if (request.scope !== "TENANT" || request.tenantId !== tenantId ||
+      !["tenant.staff.read","tenant.audit.read","tenant.access.request","tenant.departments.manage"].includes(request.permissionCode)) {
+    return deny("SCOPE_MISMATCH");
+  }
+  return evaluateStaffAccess(context, request, ["TENANT_STAFF_VIEWER", "TENANT_STAFF_MANAGER"]);
+}
+
+export function activeTenantRoleCodes(context: ResolvedStaffTenantContext, now: number): readonly string[] {
+  const membership=context.membership;
+  if (!membership || membership.status!=="ACTIVE") return [];
+  const roles=roleCodes(membership.roleGrants,"TENANT",now);
+  return roles && !roleConflict(roles.assigned,"TENANT") ? [...roles.active].sort() : [];
+}
+
+function evaluateStaffAccess(
+  context: StaffAuthorizationContext | null | undefined,
+  request: StaffAuthorizationRequest | null | undefined,
+  isolatedRoles?: readonly string[],
+): StaffAuthorizationDecision {
   if (context == null || request == null || context.principal === null) {
     return deny("MISSING_CONTEXT");
   }
@@ -292,8 +339,11 @@ export function authorizeStaffAccess(
   const roles = roleCodes(membership.roleGrants, "TENANT", now);
   if (roles === null) return deny("SCOPE_MISMATCH");
   if (roleConflict(roles.assigned, "TENANT")) return deny("ROLE_CONFLICT");
+  if (isolatedRoles && !isolatedRoles.some(role => roles.active.has(role) &&
+      findRoleDefinition(role)?.permissions.includes(request.permissionCode))) return deny("GRANT_INACTIVE");
   if (!hasPermission(roles.active, request.permissionCode)) return deny("GRANT_INACTIVE");
-  if (permission.activationPhase !== ACTIVE_AUTHORIZATION_PHASE) {
+  if (permission.activationPhase !== ACTIVE_AUTHORIZATION_PHASE &&
+      !(isolatedRoles && permission.activationPhase === "3C")) {
     return deny("PERMISSION_INACTIVE");
   }
   return { allowed: true, reason: "ALLOW" };

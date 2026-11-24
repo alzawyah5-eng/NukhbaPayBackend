@@ -12,3 +12,17 @@ packages/database/pending-migrations/004_identity_activation_safeguards.sql text
 packages/database/pending-migrations/006_staff_server_sessions.sql text eol=crlf
 # Reviewed, unregistered Brick 4A candidate.
 packages/database/pending-migrations/007_catalogue_publication_drafts.sql text eol=lf
+packages/database/pending-migrations/011_synthetic_ai_jobs.sql text eol=lf
+packages/database/fixtures/brick4-m3-authority-outbox.sql text eol=lf
+packages/database/fixtures/brick4-m3-attempt-reservations.sql text eol=lf
+# Staff-development installation and restore-candidate digests use LF bytes.
+packages/database/windows-staff/*.sql text eol=lf
+scripts/windows-staff-empty.sql text eol=lf
+scripts/windows-staff-session-login.sql text eol=lf
+scripts/windows-staff-migration.mjs text eol=lf
+scripts/windows-staff-install-sql.mjs text eol=lf
+scripts/enroll-windows-staff.mjs text eol=lf
+scripts/test/windows-staff-migration-rehearsal.mjs text eol=lf
+scripts/start-windows-staff-portal.mjs text eol=lf
+scripts/start-windows-staff-portal.ps1 text eol=lf
+scripts/apply-windows-staff-schema.ps1 text eol=lf

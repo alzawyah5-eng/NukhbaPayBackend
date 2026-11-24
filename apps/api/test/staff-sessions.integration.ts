@@ -129,13 +129,18 @@ test('restricted synthetic sessions persist atomically, revalidate actor authori
       });
       await t.test('audit failure rolls back creation, rotation and revocation without a partial success',async()=>{
         const raw=await create(),before=await count('sessions');
+        const id=(await admin.query('SELECT id FROM nukhbapay_sessions.sessions WHERE token_hash=$1',[hash(raw)])).rows[0].id;
         await migration.query(`REVOKE INSERT(id,operation_id,session_id,actor_staff_id,scope_key,event_name,occurred_ms,reason) ON nukhbapay_sessions.events FROM "${role}"`);
         try{
           assert.equal((await service.create(await actor('session-staff',tenant))).ok,false);
           assert.equal((await service.rotate(await actor('session-staff',tenant),raw)).ok,false);
           assert.equal((await service.revoke(raw)).ok,false);assert.equal(await count('sessions'),before);
         }finally{await migration.query(`GRANT INSERT(id,operation_id,session_id,actor_staff_id,scope_key,event_name,occurred_ms,reason) ON nukhbapay_sessions.events TO "${role}"`);}
-        assert.equal((await service.validate(raw)).ok,true);assert.equal((await service.revoke(raw)).ok,true);
+        assert.equal(await count('events',"WHERE session_id=$1 AND event_name='SESSION_REVOKED'",[id]),0);
+        assert.equal((await service.validate(raw)).ok,false);
+        assert.equal((await service.verifyRevocation(raw)).ok,false);
+        assert.equal((await service.revoke(raw)).ok,true);
+        assert.equal(await count('events',"WHERE session_id=$1 AND event_name='SESSION_REVOKED'",[id]),1);
       });
       await t.test('concurrent rolling validation cannot resurrect a committed revocation',async()=>{
         const raw=await create(),results=await Promise.all([service.revoke(raw),...Array.from({length:6},()=>service.validate(raw))]);
@@ -153,6 +158,7 @@ test('restricted synthetic sessions persist atomically, revalidate actor authori
       });
       await t.test('connection termination rolls back pending work, releases locks and later operations recover',async()=>{
         const raw=await create(),lock=BigInt.asIntN(64,BigInt('0x'+hash(raw).slice(0,16))).toString();
+        const id=(await admin.query('SELECT id FROM nukhbapay_sessions.sessions WHERE token_hash=$1',[hash(raw)])).rows[0].id;
         await admin.query('BEGIN');await admin.query('SELECT pg_advisory_xact_lock($1::bigint)',[lock]);
         let pending:Promise<Awaited<ReturnType<typeof service.revoke>>>|undefined;
         try{
@@ -164,8 +170,12 @@ test('restricted synthetic sessions persist atomically, revalidate actor authori
           }
           assert.equal(typeof pid,'number');assert.equal((await admin.query('SELECT pg_terminate_backend($1) AS terminated',[pid])).rows[0].terminated,true);
         }finally{await admin.query('ROLLBACK');}
-        assert.equal((await pending!).ok,false);assert.equal((await service.validate(raw)).ok,true);
+        assert.equal((await pending!).ok,false);
+        assert.equal(await count('events',"WHERE session_id=$1 AND event_name='SESSION_REVOKED'",[id]),0);
+        assert.equal((await service.validate(raw)).ok,false);
+        assert.equal((await service.verifyRevocation(raw)).ok,false);
         assert.equal((await service.revoke(raw)).ok,true);assert.equal((await service.verifyRevocation(raw)).ok,true);
+        assert.equal(await count('events',"WHERE session_id=$1 AND event_name='SESSION_REVOKED'",[id]),1);
         assert.equal((await admin.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=$1 AND state='idle in transaction'",[db])).rows[0].n,0);
       });
       await t.test('FORCE RLS prevents other-actor and other-tenant record disclosure or enumeration without exact context',async()=>{

@@ -88,8 +88,8 @@ async function inTenantTransaction<Result>(
   const client = await pool.connect();
   let releaseError: Error | undefined;
   try {
-    await client.query("BEGIN");
     try {
+      await client.query("BEGIN");
       await client.query(
         "SELECT set_config('nukhabapay.tenant_id', $1, true)",
         [tenantId],
@@ -199,8 +199,8 @@ async function inWriterTransaction<Result>(
   const client = await pool.connect();
   let releaseError: Error | undefined;
   try {
-    await client.query("BEGIN");
     try {
+      await client.query("BEGIN");
       const result = await work(client);
       await client.query("COMMIT");
       return result;

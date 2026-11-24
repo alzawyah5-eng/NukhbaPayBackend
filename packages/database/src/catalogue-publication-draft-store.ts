@@ -1,3 +1,5 @@
+import { armCatalogueRefreshWrite, lockCatalogueAccount } from "./catalogue-refresh-write-fence.js";
+import type { RefreshClaim } from "@nukhbapay/application";
 import { executeSyntheticPublication } from "./synthetic-publication-workflow.js";
 import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
@@ -35,7 +37,10 @@ function validated(config:PublicationDraftStoreConfig):PublicationDraftStoreConf
 export async function createCataloguePublicationDraftStore(input:PublicationDraftStoreConfig) {
   const config=validated(input),pool=new Pool({connectionString:config.connectionString,max:config.poolMax,connectionTimeoutMillis:3000,
     idleTimeoutMillis:1000,statement_timeout:10000,query_timeout:12000});
-  const probe=await pool.connect();
+  pool.on('error',()=>{console.error('Idle PostgreSQL publication connection unavailable');});
+  let closing:Promise<void>|undefined;
+  const close=()=>closing??=pool.end();
+  const probe=await pool.connect().catch(async()=>{await close().catch(()=>undefined);throw new Error('Publication draft store unavailable');});
   let initializationError:unknown;
   try {
     const boundary=(await probe.query(`SELECT current_database() AS database,current_user AS role,host(inet_server_addr()) AS host,inet_server_port() AS port,
@@ -64,15 +69,40 @@ export async function createCataloguePublicationDraftStore(input:PublicationDraf
     if(security.forced!==4||!security.required||security.excess||security.iam_access||security.audit_access||!security.source_views||security.source_table_access)
       throw new Error("Publication draft store unavailable");
   } catch(error) {initializationError=error;} finally {probe.release();}
-  if(initializationError!==undefined){await pool.end();throw initializationError;}
+  if(initializationError!==undefined){await close();throw new Error('Publication draft store unavailable');}
 
-  async function save(value:unknown, submission?:ReturnType<typeof consumeSubmissionEvidence>):Promise<PublicationDraftReceipt>{
+  async function save(value: unknown, submission?: ReturnType<typeof consumeSubmissionEvidence>) {
+    if(closing)throw new Error('Publication draft store unavailable');
+    return saveDraft(pool,value,submission);
+  }
+  return Object.freeze({executePublication:(value:unknown)=>executeSyntheticPublication(pool,value),save: (value:unknown)=>save(value),submit:async(value:unknown)=>{const proof=consumeSubmissionEvidence(value);return save(proof.candidate,proof);},close});
+}
+
+async function saveDraft(pool: Pool, value: unknown, submission?: ReturnType<typeof consumeSubmissionEvidence>,
+  claim?: RefreshClaim): Promise<PublicationDraftReceipt> {
     const candidate=assertGeneratedDraftPublicationCandidate(value),client=await pool.connect();
+    let broken = false, committing = false;
+    const commit = async () => {
+      committing = true;
+      if ((await client.query("COMMIT")).command !== "COMMIT") throw new Error("Catalogue draft commit unresolved");
+      committing = false;
+    };
     try {
       // The tenant/product advisory lock is the serialization boundary. READ
       // COMMITTED deliberately takes a fresh snapshot after a concurrent
       // holder commits; SERIALIZABLE would retain the pre-lock snapshot.
       await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");
+      if (claim) {
+        const sources = candidate.sourceSnapshots;
+        const [source] = sources;
+        if (sources.length !== 1 || !source) throw new Error("Refresh draft requires one source");
+        await armCatalogueRefreshWrite(client, claim, { tenantId: candidate.tenantId, providerAccountId: source.providerAccountId,
+          purpose: "DRAFT", resourceKey: candidate.candidateId });
+      }
+      if (claim || submission) {
+        const accounts=[...new Set(candidate.sourceSnapshots.map(source=>source.providerAccountId))].sort();
+        for(const account of accounts)await lockCatalogueAccount(client,candidate.tenantId,account);
+      }
       await client.query("SELECT set_config('nukhabapay.publication_tenant_id',$1,true)",[candidate.tenantId]);
       await client.query("SELECT set_config('nukhabapay.tenant_id',$1,true)",[candidate.tenantId]);
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))",[`${candidate.tenantId}:${candidate.productId}`]);
@@ -99,7 +129,7 @@ export async function createCataloguePublicationDraftStore(input:PublicationDraf
           const proof=await client.query("SELECT creator_staff_id FROM nukhabapay.price_submission_evidence WHERE candidate_id=$1 AND tenant_id=$2",[candidate.candidateId,candidate.tenantId]);
           if(!await submission.revalidate() || proof.rows[0]?.creator_staff_id!==submission.creatorStaffId)throw new Error("Legacy or differently attributed draft");
         }
-        await client.query("COMMIT");return Object.freeze({candidateId:row.candidate_id,priceVersion:Number(row.price_version),outcome:"REPLAYED",execution:"NOT_AUTHORIZED"});
+        await commit();return Object.freeze({candidateId:row.candidate_id,priceVersion:Number(row.price_version),outcome:"REPLAYED",execution:"NOT_AUTHORIZED"});
       }
       const existingCandidate=await client.query<{candidate_id:string,price_version:string}>(
         `SELECT candidate_id,price_version::text FROM nukhabapay.catalogue_publication_candidates WHERE candidate_digest=$1`,[candidate.candidateDigest]);
@@ -108,7 +138,7 @@ export async function createCataloguePublicationDraftStore(input:PublicationDraf
         const row=existingCandidate.rows[0]!;
         await client.query(`INSERT INTO nukhabapay.catalogue_publication_requests(operation_id,tenant_id,product_id,idempotency_key,candidate_id,candidate_digest,outcome)
           VALUES($1,$2,$3,$4,$5,$6,'DRAFT_REPLAYED')`,[candidate.operationId,candidate.tenantId,candidate.productId,candidate.idempotencyKey,row.candidate_id,candidate.candidateDigest]);
-        await client.query("COMMIT");return Object.freeze({candidateId:row.candidate_id,priceVersion:Number(row.price_version),outcome:"REPLAYED",execution:"NOT_AUTHORIZED"});
+        await commit();return Object.freeze({candidateId:row.candidate_id,priceVersion:Number(row.price_version),outcome:"REPLAYED",execution:"NOT_AUTHORIZED"});
       }
       const current=await client.query<{version:string}>(`SELECT coalesce(max(price_version),0)::text AS version FROM nukhabapay.catalogue_publication_candidates
         WHERE tenant_id=$1 AND product_id=$2`,[candidate.tenantId,candidate.productId]);
@@ -120,7 +150,12 @@ export async function createCataloguePublicationDraftStore(input:PublicationDraf
       for(const source of candidate.sourceSnapshots){
         const snapshot=await client.query<{tenant_id:string,provider_account_id:string,snapshot_key:string,source_version:string,observed_at:Date,completed_at:Date,status:string}>(
           `SELECT tenant_id,provider_account_id,snapshot_key,source_version,observed_at,completed_at,status
-           FROM nukhabapay.catalogue_publication_provider_snapshots WHERE id=$1 AND tenant_id=$2`,[source.snapshotId,candidate.tenantId]);
+           FROM nukhabapay.catalogue_publication_provider_snapshots s WHERE s.id=$1 AND s.tenant_id=$2
+           ${submission ? `AND s.id=(
+             SELECT latest.id FROM nukhabapay.catalogue_publication_provider_snapshots latest
+             WHERE latest.tenant_id=s.tenant_id AND latest.provider_account_id=s.provider_account_id AND latest.status='COMPLETE'
+             ORDER BY latest.observed_at DESC,latest.completed_at DESC,latest.id DESC LIMIT 1
+           )` : ""}`,[source.snapshotId,candidate.tenantId]);
         const row=snapshot.rows[0];if(snapshot.rowCount!==1||!row||row.tenant_id!==candidate.tenantId||row.provider_account_id!==source.providerAccountId||
           row.snapshot_key!==source.snapshotKey||row.source_version!==source.sourceVersion||row.status!=="COMPLETE"||
           row.observed_at.toISOString()!==new Date(source.observedAt).toISOString()||row.completed_at.toISOString()!==new Date(source.completedAt).toISOString())
@@ -129,7 +164,12 @@ export async function createCataloguePublicationDraftStore(input:PublicationDraf
       const selected=await client.query<{provider_code:string,provider_debit_minor:string,additional_provider_fee_minor:string|null}>(
         `SELECT a.provider_code,o.provider_debit_minor::text,o.additional_provider_fee_minor::text FROM nukhabapay.catalogue_publication_provider_offers o
          JOIN nukhabapay.catalogue_publication_provider_accounts a ON a.id=o.provider_account_id AND a.tenant_id=o.tenant_id
-         WHERE o.tenant_id=$1 AND o.product_id=$2 AND o.provider_snapshot_id=$3 AND o.provider_offer_key=$4`,
+         WHERE o.tenant_id=$1 AND o.product_id=$2 AND o.provider_snapshot_id=$3 AND o.provider_offer_key=$4
+           ${claim ? `AND o.provider_snapshot_id=(
+             SELECT s.id FROM nukhabapay.catalogue_publication_provider_snapshots s
+             WHERE s.tenant_id=o.tenant_id AND s.provider_account_id=o.provider_account_id AND s.status='COMPLETE'
+             ORDER BY s.observed_at DESC,s.completed_at DESC,s.id DESC LIMIT 1
+           )` : ""}`,
         [candidate.tenantId,candidate.productId,candidate.selectedSnapshotId,candidate.selectedOfferId]);
       const offer=selected.rows[0];if(selected.rowCount!==1||!offer||offer.provider_code!==candidate.selectedProviderId||
         BigInt(offer.provider_debit_minor)+BigInt(offer.additional_provider_fee_minor??"0")!==candidate.providerCostMinor)
@@ -161,8 +201,21 @@ export async function createCataloguePublicationDraftStore(input:PublicationDraf
           VALUES($1,$2,$3,$4,$5)`,[candidate.candidateId,candidate.tenantId,candidate.productId,submission.creatorStaffId,submission.submittedAt]);
         if(!await submission.revalidate())throw new Error("Stale submission authority");
       }
-      await client.query("COMMIT");return Object.freeze({candidateId:candidate.candidateId,priceVersion:candidate.priceVersion,outcome:"CREATED",execution:"NOT_AUTHORIZED"});
-    } catch(error) {await client.query("ROLLBACK").catch(()=>undefined);throw error;} finally {client.release();}
+      await commit();return Object.freeze({candidateId:candidate.candidateId,priceVersion:candidate.priceVersion,outcome:"CREATED",execution:"NOT_AUTHORIZED"});
+    } catch(error) {broken=committing;try{await client.query("ROLLBACK");}catch{broken=true;}throw error;} finally {client.release(broken);}
   }
-  return Object.freeze({executePublication:(value:unknown)=>executeSyntheticPublication(pool,value),save: (value:unknown)=>save(value),submit:async(value:unknown)=>{const proof=consumeSubmissionEvidence(value);return save(proof.candidate,proof);},close:async()=>pool.end()});
+
+/** Dedicated disposable composition. Caller owns the role and pool lifecycle. */
+export function createRefreshFencedDraftWriter(pool: Pool) {
+  return Object.freeze({
+    async saveFenced(value: unknown, claim: RefreshClaim) {
+      if (!claim) throw new Error("Refresh write fence required");
+      return saveDraft(pool,value,undefined,claim);
+    },
+    async submitFenced(value: unknown, claim: RefreshClaim) {
+      if (!claim) throw new Error("Refresh write fence required");
+      const submission=consumeSubmissionEvidence(value);
+      return saveDraft(pool,submission.candidate,submission,claim);
+    },
+  });
 }

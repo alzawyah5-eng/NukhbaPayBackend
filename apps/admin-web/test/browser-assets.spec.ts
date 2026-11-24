@@ -24,6 +24,12 @@ test('built UI serves deep links and search but never source, maps, unknown APIs
       '/preview/overview', '/preview/staff/staff-123', '/auth/logged-out']) {
       assert.equal(browserAsset(assets, path, true)?.type, 'text/html', path);
     }
+    for (const path of ['/management', '/management/overview', '/management/staff/invite']) {
+      assert.equal(browserAsset(assets, path)?.type, 'text/html', path);
+    }
+    for (const path of ['/management/api/session', '/management/preview/staff', '/management/../.env']) {
+      assert.equal(browserAsset(assets, path), undefined, path);
+    }
     assert.equal(browserAsset(assets, '/assets/index-123.js')?.type, 'text/javascript');
     for (const path of ['/preview', '/preview/overview', '/preview/staff?q=test', '/assets/App-demo.js']) {
       assert.equal(browserAsset(assets, path), undefined, path);

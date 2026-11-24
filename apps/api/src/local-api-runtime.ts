@@ -7,7 +7,7 @@ import { parseIdentityConfiguration } from "./modules/identity/identity.config.j
 import { OidcAccessTokenVerifier } from "./modules/identity/oidc-access-token.verifier.js";
 import type { JwksFetch } from "./modules/identity/trusted-jwks.js";
 import type { IdentityBoundaryDependencies } from "./modules/identity/identity-boundary.js";
-import type { StaffAuthorizationRepository, SecurityAuditWriter } from "@nukhbapay/application";
+import { createStaffAdministration, type AdministrationReaders, type StaffAuthorizationRepository, type SecurityAuditWriter } from "@nukhbapay/application";
 
 type Environment = Readonly<Record<string, string | undefined>>;
 interface IamRuntime {
@@ -26,6 +26,7 @@ export async function createLocalApiRuntime(env: Environment, dependencies: {
   readonly now?: () => Date;
   readonly rootModule?: Type<unknown>;
   readonly logger?: LoggerService | false;
+  readonly administrationReaders?: AdministrationReaders;
   readonly createIam?: (env: Environment) => Promise<IamRuntime>;
 } = {}) {
   let iam: IamRuntime | undefined;
@@ -79,7 +80,13 @@ export async function createLocalApiRuntime(env: Environment, dependencies: {
     };
     @Module({ imports: [dependencies.rootModule ?? AppModule], providers: [{ provide: "LOCAL_API_LIFECYCLE", useValue: lifecycle }] })
     class LocalRuntimeModule {}
+    const administration = iam && dependencies.administrationReaders
+      ? createStaffAdministration({ repository: iam.repository, auditWriter: iam.auditWriter,
+        readers: dependencies.administrationReaders, now: dependencies.now ?? (() => new Date()) })
+      : undefined;
     const app = await createApiApplication({ rootModule: LocalRuntimeModule, identity,
+      ...(administration?.staffAdministration && { staffAdministration: administration.staffAdministration }),
+      ...(administration?.staffCatalogue && { staffCatalogue: administration.staffCatalogue }),
       ...(dependencies.logger === undefined ? {} : { logger: dependencies.logger }) });
     let closing: Promise<void> | undefined;
     const close = (): Promise<void> => closing ??= (async () => {

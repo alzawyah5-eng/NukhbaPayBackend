@@ -2,13 +2,23 @@ import type { Pool } from "pg";
 import { parseIdentityRuntimeConfiguration } from "./identity-runtime.config.js";
 import { createIdentityReaderPool, createIdentityWriterPool } from "./pool.js";
 import { SecurityAuditPostgresRepository, StaffIdentityPostgresRepository } from "./repositories/staff-identity-repository.js";
+import { verifyWindowsStaffConnection, windowsStaffDatabase, windowsStaffTarget, type WindowsStaffTarget } from './windows-staff-target.js';
+import type { IdentityRuntimeConfiguration } from './identity-runtime.config.js';
 
 export { parseIdentityRuntimeConfiguration } from "./identity-runtime.config.js";
 export type { IdentityRuntimeConfiguration, IdentityPoolSettings } from "./identity-runtime.config.js";
 
 export class IdentityRuntimeUnavailableError extends Error {
   override readonly name = "IdentityRuntimeUnavailableError";
-  constructor() { super("Restricted IAM runtime unavailable"); }
+  constructor(
+    readonly windowsLogin?: Readonly<{
+      role: string;
+      reason: "password rejected" | "authentication rejected" | "permission denied" |
+        "connection unavailable" | "connection or restricted role check failed";
+    }>,
+  ) {
+    super("Restricted IAM runtime unavailable");
+  }
 }
 
 async function verifyLogin(pool: Pool, expectedRole: string): Promise<void> {
@@ -29,14 +39,25 @@ async function verifyLogin(pool: Pool, expectedRole: string): Promise<void> {
 
 /** Explicit initialization only; no migration, fixture, provisioning or API bootstrap. */
 export async function createIdentityRuntime(env: Readonly<Record<string, string | undefined>>) {
+  return openIdentityRuntime(parseIdentityRuntimeConfiguration(env));
+}
+
+export async function createWindowsStaffIdentityRuntime(env: Readonly<Record<string,string|undefined>>, target: WindowsStaffTarget) {
   const config = parseIdentityRuntimeConfiguration(env);
-  const reader = createIdentityReaderPool(config, config);
-  const writer = createIdentityWriterPool(config, config);
+  if (config.host !== '127.0.0.1' || config.port !== 5432 || config.database !== windowsStaffDatabase) throw new IdentityRuntimeUnavailableError();
+  return openIdentityRuntime(config,windowsStaffTarget(target.databaseOid,target.systemIdentifier));
+}
+
+async function openIdentityRuntime(config: IdentityRuntimeConfiguration, target?: WindowsStaffTarget) {
+  const reader = createIdentityReaderPool(config, config, target && (client => verifyWindowsStaffConnection(client,target,config.readerRole)));
+  const writer = createIdentityWriterPool(config, config, target && (client => verifyWindowsStaffConnection(client,target,config.writerRole)));
   let closing: Promise<void> | undefined;
   const close = (): Promise<void> => closing ??= Promise.all([reader.end(), writer.end()]).then(() => undefined);
+  let loginRole: IdentityRuntimeConfiguration["readerRole" | "writerRole"] = config.readerRole;
   try {
-    await verifyLogin(reader, config.readerRole);
-    await verifyLogin(writer, config.writerRole);
+    await verifyLogin(reader, loginRole);
+    loginRole = config.writerRole;
+    await verifyLogin(writer, loginRole);
     const checkReadiness = async (): Promise<boolean> => {
       if (closing !== undefined) return false;
       try {
@@ -66,8 +87,19 @@ export async function createIdentityRuntime(env: Readonly<Record<string, string 
       close,
       checkReadiness,
     });
-  } catch {
+  } catch (error) {
     await close().catch(() => undefined);
-    throw new IdentityRuntimeUnavailableError();
+    if (!target) throw new IdentityRuntimeUnavailableError();
+    const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+    let reason: NonNullable<IdentityRuntimeUnavailableError["windowsLogin"]>["reason"];
+    switch (code) {
+      case "28P01": reason = "password rejected"; break;
+      case "28000": reason = "authentication rejected"; break;
+      case "42501": reason = "permission denied"; break;
+      case "ECONNREFUSED":
+      case "ETIMEDOUT": reason = "connection unavailable"; break;
+      default: reason = "connection or restricted role check failed";
+    }
+    throw new IdentityRuntimeUnavailableError({ role: loginRole, reason });
   }
 }

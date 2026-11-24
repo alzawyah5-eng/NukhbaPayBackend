@@ -1,4 +1,4 @@
-import { Pool, type PoolClient } from "pg";
+import { Pool, type PoolClient, type PoolConfig } from "pg";
 import type { DatabaseConfig, IdentityDatabaseConfig } from "./config.js";
 import type { IdentityPoolSettings } from "./identity-runtime.config.js";
 
@@ -47,8 +47,10 @@ export function createImportPool(config: DatabaseConfig): Pool {
 export function createIdentityReaderPool(
   config: IdentityPoolSettings,
   identityConfig: Pick<IdentityDatabaseConfig, "readerUrl">,
+  onConnect?: PoolConfig['onConnect'],
 ): Pool {
   const pool = new Pool({
+    ...(onConnect && {onConnect}),
     connectionString: identityConfig.readerUrl,
     application_name: "nukhbapay-identity-reader",
     max: config.poolMax,
@@ -68,8 +70,10 @@ export function createIdentityReaderPool(
 export function createIdentityWriterPool(
   config: IdentityPoolSettings,
   identityConfig: Pick<IdentityDatabaseConfig, "writerUrl">,
+  onConnect?: PoolConfig['onConnect'],
 ): Pool {
   const pool = new Pool({
+    ...(onConnect && {onConnect}),
     connectionString: identityConfig.writerUrl,
     application_name: "nukhbapay-identity-audit-writer",
     max: Math.min(config.poolMax, 2),

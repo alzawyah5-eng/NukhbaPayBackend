@@ -39,3 +39,15 @@ export {
 
 export { createPublishedCatalogueReader, createCatalogueReadAuditWriter } from "./published-catalogue-reader.js";
 export type { PublishedCatalogueDatabaseConfig } from "./published-catalogue-reader.js";
+export { createAiJobPersistence, createAiJobPersistence55437 } from "./ai-job-store.js";
+export type { AiJobDatabaseConfig, AiJob55437Config } from "./ai-job-store.js";
+export { createAiJobPersistencePrepared55437, createAiJobPersistencePreparedOffline } from "./ai-job-store.js";
+export { MockPreparedAiTransport } from "./ai-job-prepared-control.js";
+export {createStaffAdministrationReader} from './staff-administration-reader.js';
+export {createStaffWorkspaceStore} from './staff-workspace.js';
+
+export * from './catalogue-refresh-store.js';
+
+export * from './staff-catalogue-reader.js';
+export { createDisposablePlatformStaffExecutor, DISPOSABLE_PLATFORM_STAFF_EFFECT, AUTH0_PLATFORM_STAFF_PILOT } from './platform-staff-executor.js';
+export type { PlatformStaffIntent, VerifiedPlatformStaffAssurance } from './platform-staff-executor.js';

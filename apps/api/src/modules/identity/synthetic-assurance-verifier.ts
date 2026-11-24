@@ -36,6 +36,9 @@ export class LocalSyntheticAssuranceVerifier implements SyntheticAssuranceVerifi
         Object.keys(p).some(key => !["iss","aud","sub","iat","exp","jti","challenge_id","binding_digest","auth_time","profile","synthetic"].includes(key))) throw new Error();
       const times = [p.iat,p.exp,p["auth_time"]];
       if (!times.every(value => typeof value === "number" && Number.isSafeInteger(value) && value >= 0)) throw new Error();
+      const finishedAtMs = this.#now().getTime();
+      if (!Number.isFinite(finishedAtMs) || finishedAtMs < now.getTime() ||
+          finishedAtMs >= Math.min(challenge.expiresAtMs, p.exp! * 1000)) throw new Error();
       const authenticatedAtMs = (p["auth_time"] as number) * 1000;
       if (p.iat! * 1000 < challenge.issuedAtMs || p.iat! * 1000 > now.getTime() || authenticatedAtMs < challenge.issuedAtMs ||
         authenticatedAtMs > p.iat! * 1000 || p.exp! <= p.iat! || p.exp! - p.iat! > 60 || p.exp! * 1000 > challenge.expiresAtMs) throw new Error();

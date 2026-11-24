@@ -1,0 +1,16 @@
+FROM docker.io/library/node:24.22.1-bookworm AS build
+WORKDIR /qualification
+RUN npm install --global pnpm@10.34.9
+COPY . .
+RUN pnpm install --frozen-lockfile
+RUN pnpm --filter @nukhbapay/api... -r build \
+    && pnpm --filter @nukhbapay/api exec tsc -p tsconfig.test.json \
+    && pnpm --filter @nukhbapay/database exec tsc -p tsconfig.test.json
+
+FROM docker.io/library/postgres:18.7-bookworm
+WORKDIR /qualification
+COPY --from=build /usr/local/bin/node /usr/local/bin/node
+COPY --from=build /qualification /qualification
+RUN node --version && openssl version
+USER postgres
+ENTRYPOINT ["node", "scripts/test/run-guarded-container-suites.mjs"]

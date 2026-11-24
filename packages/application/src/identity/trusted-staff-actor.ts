@@ -73,7 +73,8 @@ export interface AuthorizedStaffRequest {
   readonly nowMs: number; readonly validUntilMs: number;
   readonly syntheticProvenance?: VerifiedSyntheticApprovalProvenance;
   readonly approvalIntake?:ApprovalIntakeBinding;
-  revalidate(): Promise<boolean>;
+  readonly executionRehearsal?: true;
+  revalidate(expiresAtMs?: number): Promise<boolean>;
 }
 const staffRequests = new WeakSet<object>();
 const workflowReads = new WeakSet<object>();
@@ -120,6 +121,7 @@ export class TrustedStaffActorBoundary {
     syntheticAssuranceVerifier?: SyntheticAssuranceVerifier;
     syntheticWorkflowReads?: SyntheticStaffWorkflowReads;
     syntheticApprovalIntake?:SyntheticStaffApprovalIntake;
+    syntheticExecution?: { capability: "STAFF_EXECUTION_REHEARSAL_ONLY"; execute: (ticket:AuthorizedStaffRequest)=>Promise<StaffRequestResult> };
   }) {}
 
   async #resolve(identity: VerifiedStaffIdentity, tenantId?: string): Promise<StaffAuthorizationContext> {
@@ -130,6 +132,10 @@ export class TrustedStaffActorBoundary {
     const context = tenantId === undefined
       ? { ...await resolveStaffPlatformContext(this.dependencies.repository, identity), membership: null }
       : await resolveStaffTenantContext(this.dependencies.repository, identity, tenantId);
+    const resolvedAt = this.dependencies.now().getTime();
+    if (!Number.isFinite(resolvedAt) || resolvedAt < now || resolvedAt >= identity.security.expiresAt * 1000) {
+      throw new ActorRejected("INVALID_IDENTITY");
+    }
     if (!context.principal || context.principal.staffStatus !== "ACTIVE" || context.principal.identityStatus !== "ACTIVE") throw new ActorRejected("STAFF_NOT_ACTIVE");
     if (tenantId !== undefined && (!context.membership || context.membership.status !== "ACTIVE" || context.membership.tenantId !== tenantId)) throw new ActorRejected("MEMBERSHIP_NOT_ACTIVE");
     return context;
@@ -141,11 +147,11 @@ export class TrustedStaffActorBoundary {
     if (stamp(context) !== binding.stamp) throw new ActorRejected("STALE_AUTHORITY");
     return { context, binding };
   }
-  async #audit(context: StaffAuthorizationContext, success: boolean) {
+  async #audit(context: StaffAuthorizationContext, success: boolean, targetId: string | null = null) {
     await recordSecurityAuditEvents(this.dependencies.auditWriter, [{ occurredAt: this.dependencies.now().toISOString(),
       actorStaffId: context.principal!.staffId, tenantId: context.membership?.tenantId ?? null,
       action: "AUTHORIZATION_DECISION", outcome: success ? "SUCCESS" : "DENIED", targetType: "AUTHORIZATION",
-      targetId: null, requestId: randomUUID(), reasonCode: success ? "NONE" : "PERMISSION_INACTIVE" }]);
+      targetId, requestId: randomUUID(), reasonCode: success ? "NONE" : "PERMISSION_INACTIVE" }]);
   }
   async establish(identity: VerifiedStaffIdentity, tenantId?: string) {
     try {
@@ -153,7 +159,22 @@ export class TrustedStaffActorBoundary {
       const actor = Object.freeze({}) as TrustedStaffActor;
       this.#actors.set(actor, { identity, ...(tenantId === undefined ? {} : { tenantId }), stamp: stamp(context) });
       return Object.freeze({ allowed: true as const, actor, execution: "NOT_AUTHORIZED" as const });
-    } catch (error) { return denied(error instanceof ActorRejected ? error.reason : "DEPENDENCY_UNAVAILABLE"); }
+    } catch (error) {
+      const reason = error instanceof ActorRejected ? error.reason : "DEPENDENCY_UNAVAILABLE";
+      // Unknown identities are not staff actors. Record only a fixed denial category;
+      // never copy provider subjects, emails, token/metadata claims or dependency errors.
+      try {
+        await recordSecurityAuditEvents(this.dependencies.auditWriter, [{
+          occurredAt: this.dependencies.now().toISOString(), actorStaffId: null, tenantId: null,
+          action: "STAFF_IDENTITY_RESOLUTION", outcome: reason === "DEPENDENCY_UNAVAILABLE" ? "FAILURE" : "DENIED",
+          targetType: "STAFF_IDENTITY", targetId: null, requestId: randomUUID(),
+          reasonCode: reason === "STAFF_NOT_ACTIVE" ? "STAFF_NOT_ACTIVE" :
+            reason === "MEMBERSHIP_NOT_ACTIVE" ? "MEMBERSHIP_NOT_ACTIVE" :
+            reason === "INVALID_IDENTITY" ? "MISSING_CONTEXT" : "DEPENDENCY_UNAVAILABLE",
+        }]);
+      } catch { return denied("DEPENDENCY_UNAVAILABLE"); }
+      return denied(reason);
+    }
   }
 
   /** Internal session foundation only; no authentication or privileged permission is created. */
@@ -243,10 +264,14 @@ export class TrustedStaffActorBoundary {
       if (binding.tenantId !== undefined) return denied("PERMISSION_INACTIVE");
       const decision = authorizeStaffAccess(context, { permissionCode: request.permission, scope: "PLATFORM", now: this.dependencies.now().toISOString() });
       if (decision.reason !== "PERMISSION_INACTIVE") return denied(decision.reason === "ALLOW" ? "EXECUTION_BLOCKED" : decision.reason);
-      await this.#audit(context, false);
-      await this.#fresh(actor);
       const latest = await this.dependencies.requests!.find(requestId);
       if (!latest || JSON.stringify(latest) !== JSON.stringify(request)) return denied("STALE_REQUEST");
+      await this.#fresh(actor);
+      if (Date.parse(request.expiresAt) <= this.dependencies.now().getTime()) return denied("STALE_REQUEST");
+      await this.#audit(context, false, request.id);
+      for (const observation of previous) await this.#fresh(observation.actor);
+      await this.#fresh(actor);
+      if (Date.parse(request.expiresAt) <= this.dependencies.now().getTime()) return denied("STALE_REQUEST");
       const observation = Object.freeze({ actor, staffId, requestId, requestDigest: request.digest, requestVersion: request.version,
         policyVersion: STAFF_LIFECYCLE_POLICY_VERSION, observedAt: this.dependencies.now().toISOString(), assurance: "not-established" as const,
         execution: "NOT_AUTHORIZED" as const, acceptedApproval: false as const,
@@ -279,13 +304,14 @@ export class TrustedStaffActorBoundary {
       return Object.freeze({ allowed: true as const, operationId: row.operationId, outcome: "SIMULATION_RECORDED" as const, execution: "NOT_AUTHORIZED" as const });
     } catch (error) { return denied(error instanceof ActorRejected ? error.reason : "DEPENDENCY_UNAVAILABLE"); }
   }
-  async #syntheticBinding(actor: TrustedStaffActor, requestId: string) {
+  async #syntheticBinding(actor: TrustedStaffActor, requestId: string, intendedDecision?: "APPROVE" | "REJECT") {
     const current = await this.#fresh(actor), { context, binding } = current;
     if (this.dependencies.syntheticAssuranceVerifier?.capability !== "LOCAL_SYNTHETIC_ASSURANCE_ONLY" ||
       !new URL(binding.identity.issuer).hostname.endsWith(".invalid") || !uuid.test(requestId)) throw new ActorRejected("SYNTHETIC_ASSURANCE_DISABLED");
     const raw = await this.dependencies.requests?.find(requestId, binding.tenantId);
     if (!raw) throw new ActorRejected("REQUEST_UNAVAILABLE");
     const request = Object.freeze({ ...raw });
+    await this.#fresh(actor);
     if (request.id !== requestId || !hex.test(request.digest) || !/^[1-9][0-9]{0,6}$/.test(request.version) || BigInt(request.version) > 1000000n ||
       request.policyVersion !== STAFF_LIFECYCLE_POLICY_VERSION || !uuid.test(request.requesterStaffId) || !uuid.test(request.beneficiaryStaffId) ||
       !["platform.access.approve","platform.access.approve_privileged"].includes(request.permission) ||
@@ -298,19 +324,22 @@ export class TrustedStaffActorBoundary {
     if (decision.reason !== "PERMISSION_INACTIVE") throw new ActorRejected("APPROVAL_ROLE_NOT_ELIGIBLE");
     const evidenceBinding: SyntheticApprovalBinding = Object.freeze({ staffId: context.principal!.staffId, identityIssuer: binding.identity.issuer,
       identitySubject: binding.identity.subject, requestId, requestVersion: request.version, requestDigest: request.digest,
-      policyVersion: request.policyVersion, tenantId: binding.tenantId ?? null, authorityDigest: staffAuthorityDigest(context) });
+      policyVersion: request.policyVersion, tenantId: binding.tenantId ?? null, authorityDigest: staffAuthorityDigest(context),
+      ...(intendedDecision && {decision:intendedDecision}) });
     return { ...current, request, evidenceBinding };
   }
 
-  async beginSyntheticApprovalChallenge(actor: TrustedStaffActor, requestId: string) {
+  async beginSyntheticApprovalChallenge(actor: TrustedStaffActor, requestId: string, decision?: "APPROVE" | "REJECT") {
     try {
-      const current = await this.#syntheticBinding(actor, requestId);
+      if (decision !== undefined && decision !== "APPROVE" && decision !== "REJECT") return denied("INVALID_DECISION");
+      const current = await this.#syntheticBinding(actor, requestId, decision);
+      if (decision && (current.binding.tenantId !== undefined || !this.dependencies.syntheticApprovalIntake)) return denied("DECISION_UNAVAILABLE");
       const issuedAtMs = Math.floor(this.dependencies.now().getTime() / 1000) * 1000;
       const expiresAtMs = Math.min(issuedAtMs + 60000, Date.parse(current.request.expiresAt), current.binding.identity.security.expiresAt * 1000);
       if (expiresAtMs <= this.dependencies.now().getTime()) return denied("CHALLENGE_EXPIRED");
       await this.#audit(current.context, false);
-      const latest = await this.#syntheticBinding(actor, requestId);
-      if (canonicalDigest(latest.evidenceBinding) !== canonicalDigest(current.evidenceBinding)) return denied("STALE_AUTHORITY");
+      const latest = await this.#syntheticBinding(actor, requestId, decision);
+      if (this.dependencies.now().getTime() >= expiresAtMs || canonicalDigest(latest.evidenceBinding) !== canonicalDigest(current.evidenceBinding)) return denied("STALE_AUTHORITY");
       const id = randomUUID();
       const challenge = Object.freeze({ id, binding: current.evidenceBinding, issuedAtMs, expiresAtMs,
         bindingDigest: canonicalDigest([id,current.evidenceBinding,issuedAtMs,expiresAtMs]) }) as SyntheticAssuranceChallenge;
@@ -324,10 +353,12 @@ export class TrustedStaffActorBoundary {
       const state = typeof challenge === "object" && challenge !== null ? this.#challenges.get(challenge) : undefined;
       if (!state || state.actor !== actor || state.used) return denied("UNTRUSTED_OR_REPLAYED_CHALLENGE");
       state.used = true; // A failed or concurrent attempt cannot reuse the challenge.
-      let current = await this.#syntheticBinding(actor, challenge.binding.requestId);
-      const now = this.dependencies.now().getTime();
-      if (now >= challenge.expiresAtMs || canonicalDigest(current.evidenceBinding) !== canonicalDigest(challenge.binding)) return denied("STALE_CHALLENGE");
+      let current = await this.#syntheticBinding(actor, challenge.binding.requestId, challenge.binding.decision);
+      const startedAt = this.dependencies.now().getTime();
+      if (startedAt >= challenge.expiresAtMs || canonicalDigest(current.evidenceBinding) !== canonicalDigest(challenge.binding)) return denied("STALE_CHALLENGE");
       const evidence = await this.dependencies.syntheticAssuranceVerifier!.verify(assertion, challenge);
+      const now = this.dependencies.now().getTime();
+      if (!Number.isFinite(now) || now < startedAt || now >= challenge.expiresAtMs) return denied("STALE_CHALLENGE");
       if (evidence.providerIssuer !== SYNTHETIC_ASSURANCE_ISSUER || evidence.profile !== SYNTHETIC_ASSURANCE_PROFILE ||
         evidence.challengeId !== challenge.id || evidence.bindingDigest !== challenge.bindingDigest || !uuid.test(evidence.authenticationEventId) || !hex.test(evidence.assertionDigest) || !/^[A-Za-z0-9_-]{1,80}$/.test(evidence.signingKeyId) ||
         !Number.isSafeInteger(evidence.authenticatedAtMs) || evidence.authenticatedAtMs < challenge.issuedAtMs || evidence.authenticatedAtMs > now ||
@@ -335,10 +366,10 @@ export class TrustedStaffActorBoundary {
       for (const [id, expiry] of this.#authenticationEvents) if (expiry <= now) this.#authenticationEvents.delete(id);
       if (this.#authenticationEvents.has(evidence.authenticationEventId) || this.#authenticationEvents.size >= 1024) return denied("REPLAYED_AUTHENTICATION_EVENT");
       this.#authenticationEvents.set(evidence.authenticationEventId, evidence.expiresAtMs);
-      current = await this.#syntheticBinding(actor, challenge.binding.requestId);
+      current = await this.#syntheticBinding(actor, challenge.binding.requestId, challenge.binding.decision);
       if (canonicalDigest(current.evidenceBinding) !== canonicalDigest(challenge.binding) || this.dependencies.now().getTime() >= evidence.expiresAtMs) return denied("STALE_AUTHORITY");
       await this.#audit(current.context, false);
-      const afterAudit = await this.#syntheticBinding(actor, challenge.binding.requestId);
+      const afterAudit = await this.#syntheticBinding(actor, challenge.binding.requestId, challenge.binding.decision);
       if (canonicalDigest(afterAudit.evidenceBinding) !== canonicalDigest(challenge.binding) || this.dependencies.now().getTime() >= evidence.expiresAtMs) return denied("STALE_AUTHORITY");
       const data = { binding: challenge.binding, challengeId: challenge.id, authenticationEventId: evidence.authenticationEventId,
         authenticatedAtMs: evidence.authenticatedAtMs, expiresAtMs: evidence.expiresAtMs, assertionDigest: evidence.assertionDigest,
@@ -350,13 +381,13 @@ export class TrustedStaffActorBoundary {
     } catch (error) { return denied(error instanceof ActorRejected ? error.reason : "SYNTHETIC_ASSURANCE_UNVERIFIED"); }
   }
 
-  async #checkSyntheticProof(actor: TrustedStaffActor, provenance: VerifiedSyntheticApprovalProvenance, command: StaffRequestCommand) {
+  async #checkSyntheticProof(actor: TrustedStaffActor, provenance: VerifiedSyntheticApprovalProvenance, command: StaffRequestCommand, decision?: "APPROVE" | "REJECT") {
     const proof = typeof provenance === "object" && provenance !== null ? this.#proofs.get(provenance) : undefined;
     if (!proof || proof.actor !== actor || command.kind !== "REVIEW" || provenance.expiresAtMs <= this.dependencies.now().getTime() ||
-      command.id !== provenance.binding.requestId || command.version.toString() !== provenance.binding.requestVersion || command.requestDigest !== provenance.binding.requestDigest ||
+      decision !== provenance.binding.decision || command.id !== provenance.binding.requestId || command.version.toString() !== provenance.binding.requestVersion || command.requestDigest !== provenance.binding.requestDigest ||
       (proof.key !== undefined && proof.key !== command.key)) throw new ActorRejected("UNTRUSTED_OR_REPLAYED_PROVENANCE");
-    const current = await this.#syntheticBinding(actor, command.id);
-    if (canonicalDigest(current.evidenceBinding) !== canonicalDigest(provenance.binding)) throw new ActorRejected("STALE_PROVENANCE");
+    const current = await this.#syntheticBinding(actor, command.id, decision);
+    if (this.dependencies.now().getTime() >= provenance.expiresAtMs || canonicalDigest(current.evidenceBinding) !== canonicalDigest(provenance.binding)) throw new ActorRejected("STALE_PROVENANCE");
     if (proof.key !== undefined && proof.key !== command.key) throw new ActorRejected("UNTRUSTED_OR_REPLAYED_PROVENANCE");
     proof.key = command.key;
   }
@@ -372,15 +403,19 @@ export class TrustedStaffActorBoundary {
         Object.freeze({kind:"LOOKUP",key:command.key,id:command.id,version:command.version});
       if(command.kind==="ATTEMPT"){
         if(!provenance)return failedApprovalIntake();
-        await this.#checkSyntheticProof(actor,provenance,underlying);
+        await this.#checkSyntheticProof(actor,provenance,underlying,command.decision);
       }else if(provenance!==undefined)return failedApprovalIntake();
       const nowMs=this.dependencies.now().getTime(),validUntilMs=Math.min(nowMs+5000,binding.identity.security.expiresAt*1000);
       const ticket=Object.freeze({staffId:context.principal!.staffId,issuer:binding.identity.issuer,subject:binding.identity.subject,tenantId:binding.tenantId??null,
         authorityDigest:staffAuthorityDigest(context),command:underlying,nowMs,validUntilMs,
-        approvalIntake:Object.freeze({profile:"BLOCKED_SYNTHETIC_REVIEW",requestDigest:command.requestDigest,policyVersion:command.policyVersion}),
+        approvalIntake:Object.freeze({profile:"BLOCKED_SYNTHETIC_REVIEW",requestDigest:command.requestDigest,policyVersion:command.policyVersion,
+          ...(command.decision && {decision:command.decision})}),
         ...(provenance===undefined?{}:{syntheticProvenance:provenance}),revalidate:async()=>{
           try{if(this.dependencies.now().getTime()>=validUntilMs || !await eligible())return false;
-            if(provenance)await this.#checkSyntheticProof(actor,provenance,underlying);return true;
+            if(provenance)await this.#checkSyntheticProof(actor,provenance,underlying,command.decision);
+            await this.#fresh(actor);
+            const finished=this.dependencies.now().getTime();
+            return finished>=nowMs && finished<validUntilMs;
           }catch{return false;}
         }}) as AuthorizedStaffRequest;
       staffRequests.add(ticket);
@@ -396,6 +431,39 @@ export class TrustedStaffActorBoundary {
     }catch{return failedApprovalIntake(persistenceStarted?"UNRESOLVED":"DENIED");}
   }
 
+  /** Exercises the disposable store only. Its result cannot authorize a staff write. */
+  async rehearseStaffExecution(actor: TrustedStaffActor, input: Extract<StaffRequestCommand,{kind:"REVIEW"}>): Promise<StaffRequestResult> {
+    try {
+      const {context,binding}=await this.#fresh(actor);
+      const port=this.dependencies.syntheticExecution;
+      const command=normalizeStaffRequestCommand(input);
+      if (command.kind!=="REVIEW" || binding.tenantId!==undefined ||
+          !new URL(binding.identity.issuer).hostname.endsWith(".invalid") ||
+          port?.capability!=="STAFF_EXECUTION_REHEARSAL_ONLY") return staffRequestResult("DENIED");
+      const nowMs=this.dependencies.now().getTime();
+      const validUntilMs=Math.min(nowMs+5000,binding.identity.security.expiresAt*1000);
+      const ticket=Object.freeze({staffId:context.principal!.staffId,issuer:binding.identity.issuer,subject:binding.identity.subject,
+        tenantId:null,authorityDigest:staffAuthorityDigest(context),command,nowMs,validUntilMs,executionRehearsal:true,
+        revalidate:async(expiresAtMs=validUntilMs)=>{
+          try {
+            await this.#fresh(actor);
+            const finished=this.dependencies.now().getTime();
+            return finished>=nowMs && finished<Math.min(expiresAtMs,validUntilMs);
+          }catch{return false;}
+        }
+      }) as AuthorizedStaffRequest;
+      staffRequests.add(ticket);
+      try{
+        const result=await port.execute(ticket);
+        if (!await ticket.revalidate() || result.execution!=="NOT_AUTHORIZED" || result.acceptedApproval!==false) return staffRequestResult("UNRESOLVED");
+        if(result.kind!=="RECORDED" && result.kind!=="REPLAYED") return staffRequestResult(result.kind);
+        if(result.requestId!==command.id||result.version!==command.version.toString()||result.requestDigest!==command.requestDigest||
+           result.operationId!==canonicalDigest(["staff-execution-rehearsal-v1",ticket.staffId,command.key])) return staffRequestResult("UNRESOLVED");
+        return staffRequestResult(result.kind,{operationId:result.operationId,requestId:result.requestId,version:result.version,requestDigest:result.requestDigest});
+      }finally{staffRequests.delete(ticket);}
+    }catch{return staffRequestResult("DENIED");}
+  }
+
   async recordStaffRequest(actor: TrustedStaffActor, input: StaffRequestCommand, provenance?: VerifiedSyntheticApprovalProvenance): Promise<StaffRequestResult> {
     try {
       const {context,binding}=await this.#fresh(actor);
@@ -408,8 +476,16 @@ export class TrustedStaffActorBoundary {
         tenantId:binding.tenantId??null,authorityDigest:staffAuthorityDigest(context),command,nowMs,
         ...(provenance === undefined ? {} : { syntheticProvenance: provenance }),
         validUntilMs:Math.min(nowMs+5000,binding.identity.security.expiresAt*1000),
-        revalidate:async()=>{try {const current=await this.#fresh(actor);if (provenance !== undefined) await this.#checkSyntheticProof(actor, provenance, command);
-          return this.dependencies.now().getTime()<Math.min(nowMs+5000,binding.identity.security.expiresAt*1000) && await port.allows(current.context,command.kind);} catch{return false;}}
+        revalidate: async (expiresAtMs = Infinity) => {
+          try {
+            const deadline = Math.min(nowMs + 5000, binding.identity.security.expiresAt * 1000, expiresAtMs);
+            if (this.dependencies.now().getTime() >= deadline) return false;
+            const current = await this.#fresh(actor);
+            if (provenance !== undefined) await this.#checkSyntheticProof(actor, provenance, command);
+            return staffAuthorityDigest(current.context) === staffAuthorityDigest(context) &&
+              await port.allows(current.context, command.kind) && this.dependencies.now().getTime() < deadline;
+          } catch { return false; }
+        }
       }) as AuthorizedStaffRequest;
       staffRequests.add(ticket);
       try {return await port.execute(ticket);} finally {staffRequests.delete(ticket);}

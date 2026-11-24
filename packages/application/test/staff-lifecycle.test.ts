@@ -110,6 +110,19 @@ test("wrong tenant, unknown tenant and platform-to-tenant scope confusion reject
   reason(change(fixture(), { proposedRoles: ["TENANT_ADMIN"] }), "INVALID_SCOPE");
   reason(change(f, { operation: { kind: "ACTIVATE", target: "STAFF" } }), "INVALID_SCOPE");
 });
+test("lifecycle planning rejects extra effect selectors that share an existing request digest", () => {
+  const f = change(fixture({ kind: "SUSPEND", target: "STAFF" }), {}, { requester: actor(1, "SECURITY_ADMIN") });
+  slots(f, [], "SUSPENDED");
+  const operation = { ...f.request.operation, sessionId: uid(77), allSessions: false };
+  const scope = { ...f.request.scope, allSessions: true };
+  const ambiguousOperation = change(f, { operation }), ambiguousScope = change(f, { scope });
+  assert.equal(ambiguousOperation.context.currentRequestDigest, f.context.currentRequestDigest);
+  assert.equal(ambiguousScope.context.currentRequestDigest, f.context.currentRequestDigest);
+  reason(ambiguousOperation, "INVALID_INPUT");
+  reason(ambiguousScope, "INVALID_SCOPE");
+  const session = { kind: "REVOKE", target: "SESSION" } as unknown as StaffLifecycleOperation;
+  reason(change(f, { operation: session }), "INVALID_SCOPE");
+});
 test("role conflicts include future and expired unrevoked assignments, but cancellation can resolve them", () => {
   const f = fixture({ kind: "REACTIVATE", target: "MEMBERSHIP" }, tenant);
   for (const time of [{ grantedAtMs: NOW + 1000, expiresAtMs: null }, { grantedAtMs: NOW - 1000, expiresAtMs: NOW }]) {
@@ -287,8 +300,10 @@ test("not-established authentication assurance and reserved permissions never be
   const f = fixture(); const plan = evaluate(change(f, {}, { approvals: [approval(f)] }));
   assert.equal(identity.security.assurance, "not-established"); assert.equal(plan.execution, "NOT_AUTHORIZED");
   assert.ok(plan.executionBlockers.includes("ASSURANCE_NOT_ESTABLISHED"));
-  const decision = authorizeStaffAccess({ principal: { staffId: uid(2), staffStatus: "ACTIVE", identityStatus: "ACTIVE", tokensValidAfter: null, authzVersion: 1n }, membership: null,
-    platformRoleGrants: [{ roleCode: "SECURITY_ADMIN", scope: "PLATFORM", grantedAt: new Date(NOW - 1000).toISOString(), expiresAt: null, revokedAt: null }] },
-    { permissionCode: "platform.staff.suspend", scope: "PLATFORM", now: new Date(NOW).toISOString() });
-  assert.deepEqual(decision, { allowed: false, reason: "PERMISSION_INACTIVE" });
+  for (const permissionCode of ["platform.staff.suspend", "platform.sessions.revoke"]) {
+    const decision = authorizeStaffAccess({ principal: { staffId: uid(2), staffStatus: "ACTIVE", identityStatus: "ACTIVE", tokensValidAfter: null, authzVersion: 1n }, membership: null,
+      platformRoleGrants: [{ roleCode: "SECURITY_ADMIN", scope: "PLATFORM", grantedAt: new Date(NOW - 1000).toISOString(), expiresAt: null, revokedAt: null }] },
+      { permissionCode, scope: "PLATFORM", now: new Date(NOW).toISOString() });
+    assert.deepEqual(decision, { allowed: false, reason: "PERMISSION_INACTIVE" });
+  }
 });

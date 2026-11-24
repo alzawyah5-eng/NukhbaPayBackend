@@ -4,17 +4,47 @@
   "private": true,
   "type": "module",
   "exports": {
-    "./portal": { "types": "./dist/portal.d.ts", "import": "./dist/portal.js" },
-    "./auth0": { "types": "./dist/auth0.d.ts", "import": "./dist/auth0.js" }
+    "./portal": {
+      "types": "./dist/portal.d.ts",
+      "import": "./dist/portal.js"
+    },
+    "./auth0": {
+      "types": "./dist/auth0.d.ts",
+      "import": "./dist/auth0.js"
+    },
+    "./staff-login-integration": {
+      "types": "./dist/staff-login-integration.d.ts",
+      "import": "./dist/staff-login-integration.js"
+    },
+    "./platform-staff-step-up": {
+      "types": "./dist/platform-staff-step-up.d.ts",
+      "import": "./dist/platform-staff-step-up.js"
+    }
   },
   "description": "Local HTTPS staff BFF; real login and session activation remain disabled.",
-  "engines": { "node": ">=24 <25" },
+  "engines": {
+    "node": ">=24 <25"
+  },
   "scripts": {
-    "build": "tsc -p tsconfig.json && tsc --noEmit -p client/tsconfig.json && vite build --config vite.config.ts",
+    "build": "tsc -p tsconfig.json && tsc --noEmit -p client/tsconfig.json && vite build --configLoader native --config vite.config.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p client/tsconfig.json",
     "test": "tsc -p tsconfig.test.json && node --test dist-test/test/*.spec.js",
     "start": "node dist/main.js"
   },
-  "dependencies": { "@nukhbapay/application": "workspace:*", "jose": "6.2.17", "lucide-react": "0.468.0", "react": "19.0.0", "react-dom": "19.0.0", "react-router-dom": "7.0.0" },
-  "devDependencies": { "@types/node": "24.19.2", "typescript": "6.0.2", "@types/react": "19.0.0", "@types/react-dom": "19.0.0", "@vitejs/plugin-react": "4.3.4", "vite": "6.0.5" }
+  "dependencies": {
+    "@nukhbapay/application": "workspace:*",
+    "jose": "6.2.17",
+    "lucide-react": "0.468.0",
+    "react": "19.0.0",
+    "react-dom": "19.0.0",
+    "react-router-dom": "7.18.5"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "@types/react": "19.0.0",
+    "@types/react-dom": "19.0.0",
+    "@vitejs/plugin-react": "4.3.4",
+    "typescript": "6.0.2",
+    "vite": "6.4.6"
+  }
 }

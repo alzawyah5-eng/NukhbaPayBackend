@@ -101,7 +101,7 @@ test('audit or persistence outage and uncertain acknowledgement never return suc
   const f=fixture(),s=f.make(),actor=await f.actor();f.failAudit();assert.equal((await s.create(actor)).ok,false);assert.equal(f.rows.size,0);
   f.failAudit(false);f.failStore();assert.equal((await s.create(actor)).ok,false);f.failStore(false);
   const raw=(await token(s,actor)).credential.cookieValue();f.failStore();assert.equal((await s.validate(raw)).ok,false);assert.equal((await s.revoke(raw)).ok,false);
-  f.failStore(false);assert.equal((await s.validate(raw)).ok,true);assert.equal((await s.revoke(raw)).ok,true);
+  f.failStore(false);assert.equal((await s.validate(raw)).ok,false);assert.equal((await s.revoke(raw)).ok,true);
 });
 test('session store tickets are immutable, one-use capabilities rather than executable JSON',async()=>{
   assert.equal(consumeStaffSessionTicket({operation:'CREATE',staffId:staff}),false);
@@ -109,6 +109,32 @@ test('session store tickets are immutable, one-use capabilities rather than exec
   const s=new StaffSessionLifecycle({actors:f.actors,now:f.now,enabled:true,store:{execute:async ticket=>{captured=ticket;assert.equal(Object.isFrozen(ticket)&&Object.isFrozen(ticket.binding),true);return f.store.execute(ticket);}}});
   await token(s,await f.actor());assert.ok(captured);assert.equal(await f.store.execute(captured),'DENIED');
   assert.equal(await f.store.execute(JSON.parse(JSON.stringify(captured)) as StaffSessionTicket),'DENIED');
+});
+
+test('logout immediately denies concurrent validation and rotation even when persistence is unavailable',async()=>{
+  const f=fixture(),actor=await f.actor();let pause=false,entered!:()=>void,resume!:()=>void;
+  const waiting=new Promise<void>(r=>{entered=r;}),gate=new Promise<void>(r=>{resume=r;});
+  const service=new StaffSessionLifecycle({actors:f.actors,now:f.now,enabled:true,store:{execute:async ticket=>{
+    if(pause&&ticket.operation==='VALIDATE'){entered();await gate;}
+    return f.store.execute(ticket);
+  }}});
+  const raw=(await token(service,actor)).credential.cookieValue();pause=true;
+  const validation=service.validate(raw);await waiting;
+  f.failStore();assert.equal((await service.revoke(raw)).ok,false);f.failStore(false);resume();
+  assert.equal((await validation).ok,false);
+  assert.equal((await service.rotate(actor,raw)).ok,false);
+  assert.equal((await service.validate(raw)).ok,false);
+  assert.equal((await service.revoke(raw)).ok,true);
+});
+
+test('cleanup releases expired bindings while preserving live sessions and durable history',async()=>{
+  const f=fixture(),service=f.make(),actor=await f.actor();
+  const expired=(await token(service,actor)).credential.cookieValue();f.advance(5000);
+  const live=(await token(service,actor)).credential.cookieValue();f.advance(5000);
+  assert.equal(service.cleanup(),1);assert.equal(service.cleanup(),0);
+  assert.equal((await service.validate(expired)).ok,false);assert.equal(f.rows.size,2);
+  // The later session exceeded idle time but its absolute binding has not been removed.
+  assert.equal((await service.revoke(live)).ok,true);
 });
 test('authority changes during commit acknowledgement revoke issued or unissued generations and cannot be restored',async()=>{
   for(const phase of ['CREATE','VALIDATE']){

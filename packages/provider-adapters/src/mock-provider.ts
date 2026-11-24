@@ -35,7 +35,8 @@ export class SyntheticCatalogProvider implements CatalogProvider {
     })]);
   }
 
-  async fetchCatalog(): Promise<readonly ProviderOffer[]> {
+  async fetchCatalog(signal?: AbortSignal): Promise<readonly ProviderOffer[]> {
+    signal?.throwIfAborted();
     return this.offers;
   }
 }

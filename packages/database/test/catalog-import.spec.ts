@@ -7,6 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { Client, Pool } from "pg";
+import { createCatalogueRefreshStore } from "../src/catalogue-refresh-store.js";
 import { parseDatabaseConfig, parseIntegrationAdminUrl } from "../src/config.js";
 import {
   CatalogImportConflictError,
@@ -796,4 +797,70 @@ test("a failure after writes rolls back only the failed import", { skip: !hasDat
   } finally {
     await dropDatabase(databaseName);
   }
+});
+
+test("scheduled PostgreSQL import commits only under a current lease", { skip: !hasDatabaseConfig || !process.env["NUKHBA_DISPOSABLE_PG_DIRECTORY"] }, async () => {
+  await withAdminClient(async client => {
+    const { rows: [target] } = await client.query<{ path: string; port: number }>(
+      "SELECT current_setting('data_directory') AS path, inet_server_port() AS port",
+    );
+    const normalizedPath = (value: string) => path.resolve(value).toLowerCase();
+    assert.equal(normalizedPath(target!.path), normalizedPath(process.env["NUKHBA_DISPOSABLE_PG_DIRECTORY"]!));
+    assert.ok(![5432, 55437].includes(target!.port));
+  });
+  const config = parseDatabaseConfig(process.env);
+  const database = `nukhabapay_r_${randomUUID().replaceAll("-", "")}`;
+  const tenant = randomUUID(), account = randomUUID(), schedule = randomUUID();
+  await createDatabase(database);
+  try {
+    const ownerUrl = databaseUrl(config.migrationUrl, database);
+    runMigrationUp(ownerUrl, "migrations");
+    const owner = new Client({ connectionString: ownerUrl });
+    const observer = new Client({ connectionString: databaseUrl(parseIntegrationAdminUrl(adminUrl).connectionString, database) });
+    const pool = new Pool({ connectionString: databaseUrl(config.importUrl, database), max: 2 });
+    try {
+      await owner.connect();
+      await observer.connect();
+      for (const file of ["012_catalogue_refresh_R2_PROPOSAL.sql", "012_catalogue_refresh_write_fence_PROPOSAL.sql"]) {
+        await owner.query(fs.readFileSync(path.join(packageRoot, "pending-migrations", file), "utf8"));
+      }
+      const role = quoteIdentifier(config.importRole);
+      await owner.query(`GRANT SELECT ON nukhabapay.catalogue_refresh_schedules TO ${role};
+        GRANT SELECT, INSERT, UPDATE ON nukhabapay.catalogue_refresh_jobs TO ${role};
+        GRANT INSERT ON nukhabapay.catalogue_refresh_audit,nukhabapay.catalogue_refresh_write_evidence TO ${role};
+        GRANT USAGE ON SEQUENCE nukhabapay.catalogue_refresh_audit_id_seq TO ${role};
+        CREATE FUNCTION nukhabapay.fixture_delay_import() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF NEW.snapshot_key = 'scheduled-expired' THEN PERFORM pg_sleep(1.35); END IF;
+          RETURN NEW;
+        END $$;
+        CREATE TRIGGER fixture_delay_import BEFORE INSERT ON nukhabapay.provider_snapshots
+        FOR EACH ROW EXECUTE FUNCTION nukhabapay.fixture_delay_import();`);
+      await owner.query("INSERT INTO nukhabapay.tenants(id,tenant_key) VALUES($1,'scheduled-fixture')",[tenant]);
+      await owner.query("INSERT INTO nukhabapay.provider_accounts(id,tenant_id,provider_code,external_account_key,status) VALUES($1,$2,'synthetic-fenced','fixture','ACTIVE')",[account,tenant]);
+      await observer.query(`INSERT INTO nukhabapay.catalogue_refresh_schedules VALUES
+        ($1,$2,$3,'v1','v1',true,floor(extract(epoch FROM clock_timestamp())*1000)::bigint-200,86400000)`,[schedule,tenant,account]);
+      const offer = createOffer("synthetic-fenced","fenced-offer","scheduled-first",9_600n);
+      await seedApprovedMapping(owner, tenant, account, offer);
+      const store = createCatalogueRefreshStore(pool, [tenant]);
+      const catalogue = new CatalogPostgresRepository(pool);
+      const firstClaim = await store.claim(0, 12_000);
+      assert.ok(firstClaim);
+      const context = { tenantId:tenant, providerAccountId:account, snapshotKey:offer.snapshotId, sourceVersion:"v1", observedAt:offer.observedAt };
+      assert.equal((await catalogue.importFencedSnapshot(context, [offer], firstClaim)).created, true);
+      assert.equal((await catalogue.importFencedSnapshot(context, [offer], firstClaim)).created, false);
+      await store.settle(firstClaim, { state:"SUCCEEDED", reason:"NONE", nextAttemptAtMs:null }, 0);
+
+      await observer.query("UPDATE nukhabapay.catalogue_refresh_schedules SET version='v2' WHERE id=$1",[schedule]);
+      const nextClaim = await store.claim(0, 1_200);
+      assert.ok(nextClaim);
+      const expired = { ...context, snapshotKey:"scheduled-expired" };
+      await assert.rejects(catalogue.importFencedSnapshot(expired, [{ ...offer, snapshotId:expired.snapshotKey }], nextClaim), { code:"42501" });
+      assert.equal(await catalogue.readSnapshot(tenant, account, expired.snapshotKey), null);
+      assert.equal((await catalogue.readSnapshot(tenant, account, offer.snapshotId))?.offers.length, 1);
+      assert.equal((await observer.query("SELECT count(*)::int AS count FROM nukhabapay.catalogue_refresh_write_evidence WHERE version='v2'")).rows[0].count, 0);
+      await store.expire(0);
+      assert.equal(await store.claim(0, 12_000), null);
+    } finally { await Promise.all([owner.end(), observer.end(), pool.end()]); }
+  } finally { await dropDatabase(database); }
 });

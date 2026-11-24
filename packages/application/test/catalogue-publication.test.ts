@@ -7,6 +7,9 @@ import type { ProviderOffer } from "../../provider-contracts/src/index.js";
 import { classifyAdvisoryPublicationEvidence, generateDraftPublicationCandidate } from "../src/catalog/publication-candidate.js";
 import type { DraftPublicationRequest, PublicationSourceSnapshot } from "../src/catalog/publication-candidate.js";
 
+import { prepareSyntheticPublicationCommand, type PublicationCommand, type SyntheticPublicationAuthority } from "../src/catalog/publication-workflow.js";
+import { attestVerifiedStaffIdentity } from "../src/identity/verified-staff-identity.js";
+
 const POLICY:PricingPolicy=Object.freeze({version:"publication-policy-v1",serviceFeeMinor:200n,maximumServiceFeeMinor:200n,
   taxAmountMinor:0n,paymentFeeBasisPoints:150,paymentFixedFeeMinor:20n,agentCommissionMinor:50n,
   minimumContributionMinor:100n,maximumOfferAgeMs:24*60*60*1000});
@@ -80,4 +83,36 @@ test("concurrent pure generation converges without shared mutable state",async()
   const request=await fixture(),results=await Promise.all(Array.from({length:12},async()=>generateDraftPublicationCandidate(request)));
   assert.equal(new Set(results.map(result=>result.candidateId)).size,1);
   assert.ok(results.every(result=>result.execution==="NOT_AUTHORIZED"&&result.activationAllowed===false));
+});
+
+test("publication command admission rechecks token, grant and ticket expiry after asynchronous authority",async()=>{
+  const input:PublicationCommand={action:"APPROVE",tenantId:tenant,productId,candidateId:"a".repeat(64),
+    candidateVersion:1,expectedActiveId:null,rollbackSourceId:null,idempotencyKey:randomUUID(),reason:null};
+  const base=Date.now(),staffId=randomUUID(),membershipId=randomUUID();
+  let now=base,crossDuringCheck=0;
+  const identity=(expiresAt:number)=>attestVerifiedStaffIdentity({issuer:"https://publication.fixture.invalid/",subject:staffId,
+    security:{audience:"urn:fixture:publication",clientId:"fixture",profile:"rfc9068-staff-v1",principalKind:"human",
+      issuedAt:Math.floor(base/1000)-10,expiresAt,assurance:"not-established"}});
+  const authority=(grantExpiry:number):SyntheticPublicationAuthority=>({
+    capability:"ISOLATED_SYNTHETIC_PUBLICATION_ONLY",now:()=>new Date(now),
+    auditWriter:{appendSecurityAuditEvents:async()=>{}},
+    repository:{
+      findByTrustedIdentity:async()=>({staffId,staffStatus:"ACTIVE",identityStatus:"ACTIVE",authzVersion:1n,tokensValidAfter:null}),
+      findPlatformRoleGrants:async()=>[],
+      findTenantMembership:async()=>({membershipId,tenantId:tenant,status:"ACTIVE",version:1n,
+        roleGrants:[{roleCode:"PRICING_APPROVER",scope:"TENANT",grantedAt:new Date(base-10000).toISOString(),
+          expiresAt:new Date(grantExpiry).toISOString(),revokedAt:null}]}),
+    },
+    async allows(){await Promise.resolve();now+=crossDuringCheck;return true;},
+  });
+  const long=identity(Math.floor(base/1000)+60);
+  crossDuringCheck=2000;
+  await assert.rejects(prepareSyntheticPublicationCommand(authority(base+60000),identity(Math.floor(base/1000)+1),input),/denied/);
+  now=base;
+  await assert.rejects(prepareSyntheticPublicationCommand(authority(base+1000),long,input),/denied/);
+  now=base;
+  crossDuringCheck=0;
+  const ticket=await prepareSyntheticPublicationCommand(authority(base+60000),long,input);
+  crossDuringCheck=5000;
+  assert.equal(await ticket.revalidate(),false);
 });

@@ -1,3 +1,4 @@
+import type { RefreshClaim } from "./durable-refresh.js";
 import type { CatalogProvider, ProviderOffer } from "../../../provider-contracts/src/index.js";
 
 export interface CatalogImportCounts {
@@ -58,6 +59,18 @@ export interface CatalogImportRepository {
       readonly effectiveAt?: string | null;
     },
     offers: readonly ProviderOffer[],
+  ) => Promise<CatalogImportResult>;
+  readonly importFencedSnapshot?: (
+    context: {
+      readonly tenantId: string;
+      readonly providerAccountId: string;
+      readonly snapshotKey: string;
+      readonly sourceVersion: string;
+      readonly observedAt: string;
+      readonly effectiveAt?: string | null;
+    },
+    offers: readonly ProviderOffer[],
+    claim: RefreshClaim,
   ) => Promise<CatalogImportResult>;
   readonly readSnapshot: (
     tenantId: string,

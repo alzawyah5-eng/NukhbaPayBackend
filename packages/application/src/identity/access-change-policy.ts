@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { findRoleDefinition } from "./permission-catalog.js";
 import {
-  classifyLifecycleGrant, LIFECYCLE_EXECUTION_BLOCKERS, STAFF_LIFECYCLE_POLICY_VERSION, validLifecycleTime,
+  classifyLifecycleGrant, hasStaffLifecycleOperationFields, LIFECYCLE_EXECUTION_BLOCKERS, STAFF_LIFECYCLE_POLICY_VERSION, validLifecycleTime,
   type AccessChangeRequest, type AccessRequestEvent, type AccessRequestState, type ApprovalSlot,
   type LifecycleActor, type LifecycleGrant, type LifecyclePolicyContext, type LifecyclePolicyReason,
   type LifecyclePolicyResult, type LifecycleScope, type PlanningBoundary,
@@ -15,7 +15,9 @@ const lowRisk = new Set(["SUPPORT_AGENT", "CATALOG_OPERATOR"]);
 const boundary: PlanningBoundary = Object.freeze({ execution: "NOT_AUTHORIZED", executionBlockers: LIFECYCLE_EXECUTION_BLOCKERS });
 const reject = (reason: LifecyclePolicyReason): Extract<LifecyclePolicyResult, { kind: "REJECTED" }> => Object.freeze({ ...boundary, kind: "REJECTED", reason });
 const scopeValid = (scope: LifecycleScope): boolean => scope?.kind === "PLATFORM"
-  ? !("tenantId" in scope) : scope?.kind === "TENANT" && id(scope.tenantId);
+  ? Reflect.ownKeys(scope).length === 1 && Object.hasOwn(scope, "kind") && !("tenantId" in scope)
+  : scope?.kind === "TENANT" && Reflect.ownKeys(scope).length === 2 && Object.hasOwn(scope, "kind") &&
+    Object.hasOwn(scope, "tenantId") && id(scope.tenantId);
 const sameScope = (a: LifecycleScope, b: LifecycleScope): boolean => a.kind === b.kind &&
   (a.kind === "PLATFORM" || (b.kind === "TENANT" && a.tenantId === b.tenantId));
 const states: readonly AccessRequestState[] = ["DRAFT", "SUBMITTED", "APPROVED", "REJECTED", "CANCELLED", "EXPIRED", "SUPERSEDED", "APPLIED"];
@@ -94,6 +96,8 @@ function plan(r: AccessChangeRequest, c: LifecyclePolicyContext, now: number): L
   const op = r.operation;
   const operationShape: { kind: string; target: string } = op;
   if (!op || !["CREATE", "ACTIVATE", "SUSPEND", "REVOKE", "REACTIVATE", "DISABLE", "RECOVER"].includes(op.kind)) return reject("INVALID_INPUT");
+  // The canonical intent digest covers only these selectors. Reject additional effect or scope fields.
+  if (!hasStaffLifecycleOperationFields(op)) return reject("INVALID_INPUT");
   if ((op.target === "STAFF" && r.scope.kind !== "PLATFORM") || (op.target === "MEMBERSHIP" && r.scope.kind !== "TENANT") ||
       !["STAFF", "MEMBERSHIP", "GRANT"].includes(op.target) ||
       (["CREATE", "ACTIVATE", "DISABLE", "RECOVER"].includes(op.kind) && op.target !== "STAFF") ||

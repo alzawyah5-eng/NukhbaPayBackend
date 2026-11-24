@@ -142,3 +142,39 @@ test("valid numeric offsets, optional milliseconds, and Gregorian leap days rema
     assert.equal(selectOffer(SYNTHETIC_PRODUCT, [leapDayOffer], POLICY, `${year}-02-29T10:00:00Z`).selected.providerId, "synthetic-provider-a");
   }
 });
+
+test("equal-cost offer choice is independent of input order", async () => {
+  const input = await offers();
+  const a = input[0]!;
+  const b = { ...a, providerId: "synthetic-provider-b", offerId: "equal-cost-b" };
+  for (const candidates of [[a, b], [b, a]]) {
+    assert.equal(selectOffer(SYNTHETIC_PRODUCT, candidates, POLICY, SYNTHETIC_NOW).selected.providerId, a.providerId);
+  }
+});
+
+test("offer freshness accepts the exact age limit and rejects one millisecond beyond it", async () => {
+  const [offer] = await offers();
+  const observedAt = new Date(Date.parse(SYNTHETIC_NOW) - POLICY.maximumOfferAgeMs).toISOString();
+  const boundary = { ...offer!, observedAt };
+  assert.equal(selectOffer(SYNTHETIC_PRODUCT, [boundary], POLICY, SYNTHETIC_NOW).selected.offerId, offer!.offerId);
+  assert.throws(() => selectOffer(SYNTHETIC_PRODUCT, [{ ...boundary,
+    observedAt: new Date(Date.parse(observedAt) - 1).toISOString(),
+  }], POLICY, SYNTHETIC_NOW), /No eligible/);
+});
+
+test("the minimum contribution is inclusive and one minor unit below is blocked", async () => {
+  const input = await offers();
+  assert.equal(simulatePrice(SYNTHETIC_PRODUCT, input, { ...POLICY, minimumContributionMinor: 277n }, SYNTHETIC_NOW)
+    .internalTrace.expected_contribution, "2.77");
+  assert.throws(() => simulatePrice(SYNTHETIC_PRODUCT, input, { ...POLICY, minimumContributionMinor: 278n }, SYNTHETIC_NOW),
+    /below the approved minimum/);
+});
+
+test("fractional basis points and negative provider charges cannot enter financial arithmetic", async () => {
+  const input = await offers();
+  assert.throws(() => simulatePrice(SYNTHETIC_PRODUCT, input, { ...POLICY, paymentFeeBasisPoints: 150.5 }, SYNTHETIC_NOW),
+    /basisPoints/);
+  const result = selectOffer(SYNTHETIC_PRODUCT, [{ ...input[0]!, additionalProviderFeeMinor: -1n }, input[1]!], POLICY, SYNTHETIC_NOW);
+  assert.equal(result.selected.providerId, "synthetic-provider-b");
+  assert.match(result.rejections[0]!.reason, /additionalProviderFeeMinor/);
+});

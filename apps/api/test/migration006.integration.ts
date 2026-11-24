@@ -267,14 +267,16 @@ test('combined 001-006 enforces authority invalidation, restricted sessions and 
       await t.test('pg_dump/pg_restore restores complete history, session evidence, owners, grants and FORCE RLS into a fresh disposable database',async()=>{
         const directory=mkdtempSync(path.join(tmpdir(),'nukh-migration-test-')),archive=path.join(directory,'synthetic.dump');
         const bin=process.env['NUKHBAPAY_PG_TEST_BIN'];assert.ok(bin && path.isAbsolute(bin),'Explicit PostgreSQL test binary directory required');
+        const suffix=process.platform==='win32'?'.exe':'';
+        const pgDump=path.join(bin,'pg_dump'+suffix),pgRestore=path.join(bin,'pg_restore'+suffix);
         const adminUrl=new URL(process.env['DB_TEST_ADMIN_URL']!);
         const env={...process.env,PGHOST:'127.0.0.1',PGPORT:'5432',PGUSER:decodeURIComponent(adminUrl.username),PGPASSWORD:decodeURIComponent(adminUrl.password)};
         const evidence=async(c:Client)=>(await c.query("SELECT encode(sha256(convert_to(coalesce(string_agg(row_to_json(e)::text,',' ORDER BY id),''),'UTF8')),'hex') AS digest,count(*)::int AS n FROM nukhbapay_sessions.events e")).rows[0];
         const before=await evidence(admin);
         try {
-          execFileSync(path.join(bin!,'pg_dump.exe'),['--format=custom','--file',archive,'--dbname',f.databaseName],{env,stdio:'pipe',windowsHide:true,timeout:30000});
+          execFileSync(pgDump,['--format=custom','--file',archive,'--dbname',f.databaseName],{env,stdio:'pipe',windowsHide:true,timeout:30000});
           await withDisposableIamDatabase(async restored=>{
-            execFileSync(path.join(bin!,'pg_restore.exe'),['--exit-on-error','--single-transaction','--dbname',restored.databaseName,archive],{env,stdio:'pipe',windowsHide:true,timeout:30000});
+            execFileSync(pgRestore,['--exit-on-error','--single-transaction','--dbname',restored.databaseName,archive],{env,stdio:'pipe',windowsHide:true,timeout:30000});
             assert.deepEqual((await restored.fixtureClient.query('SELECT name FROM nukhabapay.schema_migrations ORDER BY id')).rows.map(r=>r.name),expected);
             assert.deepEqual(await evidence(restored.fixtureClient),before);
             assert.equal((await restored.fixtureClient.query("SELECT bool_and(relrowsecurity AND relforcerowsecurity AND pg_get_userbyid(relowner)='nukhabapay_migrator') AS ok FROM pg_class WHERE relnamespace='nukhbapay_sessions'::regnamespace AND relkind='r'")).rows[0].ok,true);
@@ -284,7 +286,7 @@ test('combined 001-006 enforces authority invalidation, restricted sessions and 
           },'b3b3',0);
           await withDisposableIamDatabase(async failed=>{
             await failed.fixtureClient.query('CREATE SCHEMA nukhbapay_sessions AUTHORIZATION nukhabapay_migrator');
-            assert.throws(()=>execFileSync(path.join(bin!,'pg_restore.exe'),['--exit-on-error','--single-transaction','--dbname',failed.databaseName,archive],{env,stdio:'pipe',windowsHide:true,timeout:30000}));
+            assert.throws(()=>execFileSync(pgRestore,['--exit-on-error','--single-transaction','--dbname',failed.databaseName,archive],{env,stdio:'pipe',windowsHide:true,timeout:30000}));
             assert.equal((await failed.fixtureClient.query("SELECT to_regnamespace('nukhabapay') IS NULL AS absent")).rows[0].absent,true);
             assert.equal((await failed.fixtureClient.query("SELECT count(*)::int AS n FROM pg_class WHERE relnamespace='nukhbapay_sessions'::regnamespace")).rows[0].n,0);
           },'b3b3',0);

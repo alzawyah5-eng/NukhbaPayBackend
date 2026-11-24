@@ -1,45 +1,55 @@
+import { validDepartmentAccess, type DepartmentAccess } from './department.js';
 export type SessionState =
   | { kind: 'loading' | 'anonymous' | 'unavailable' | 'forbidden' }
   | { kind: 'authenticated'; csrfToken: string; profile: StaffProfile };
 
+export const workspacePaths=['/overview','/staff','/staff/invite','/roles','/departments','/access-requests',
+  '/security','/sessions','/audit','/reports','/settings','/catalogue','/staff/commands','/catalogue/publication'] as const;
+export type WorkspacePath=typeof workspacePaths[number];
+
 export interface StaffProfile {
   readonly staffId:string; readonly tenantId:string|null; readonly expiresAtMs:number;
-  readonly navigation:readonly ['/overview'];
+  readonly navigation: readonly WorkspacePath[];
+  readonly departmentAccess?:DepartmentAccess;
 }
 
-export async function readLoginPath(signal?:AbortSignal):Promise<'/auth/login'|undefined> {
+export async function readLoginConfig(signal?:AbortSignal):Promise<{path:'/auth/login';departmentLogin:boolean}|undefined> {
   try {
     const response=await fetch('/auth/config',{credentials:'same-origin',cache:'no-store',signal:signal??null});
     if(!response.ok)return undefined;
     const data:unknown=await response.json();
-    return data && typeof data==='object' && !Array.isArray(data) && Object.keys(data).length===1 &&
-      'loginPath' in data && data.loginPath==='/auth/login'?'/auth/login':undefined;
+    if(!data||typeof data!=='object'||Array.isArray(data)||!('loginPath' in data)||data.loginPath!=='/auth/login')return undefined;
+    if(Object.keys(data).length===1)return {path:'/auth/login',departmentLogin:false};
+    if(Object.keys(data).length===2 && 'departmentLogin' in data && data.departmentLogin===true)return {path:'/auth/login',departmentLogin:true};
+    return undefined;
   }catch{return undefined;}
 }
+export async function readLoginPath(signal?:AbortSignal){return (await readLoginConfig(signal))?.path;}
 
 // Only the existing same-origin BFF is contacted. Cookies are HttpOnly; CSRF stays in memory.
 export async function readSession(signal?: AbortSignal): Promise<SessionState> {
   try {
-    const response = await fetch('/auth/session', {
+    const response = await fetch('/auth/workspace', {
       credentials: 'same-origin', cache: 'no-store', signal: signal ?? null,
     });
     if (response.status === 401) return { kind: 'anonymous' };
     if (response.status === 403) return { kind: 'forbidden' };
     if (!response.ok) return { kind: 'unavailable' };
     const data: unknown = await response.json();
-    if (typeof data === 'object' && data !== null && 'authenticated' in data && data.authenticated === true &&
-      'csrfToken' in data && typeof data.csrfToken === 'string' && /^[A-Za-z0-9_-]{43}$/.test(data.csrfToken)) {
-      const self=await fetch('/auth/me',{credentials:'same-origin',cache:'no-store',signal:signal??null});
-      if(self.status===401)return {kind:'anonymous'};
-      if(self.status===403)return {kind:'forbidden'};
-      if(!self.ok)return {kind:'unavailable'};
-      const profile:unknown=await self.json(),uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-      if(profile && typeof profile==='object' && !Array.isArray(profile) && Object.keys(profile).sort().join(',')==='expiresAtMs,navigation,staffId,tenantId' &&
-        'staffId' in profile && typeof profile.staffId==='string' && uuid.test(profile.staffId) &&
-        'tenantId' in profile && (profile.tenantId===null||typeof profile.tenantId==='string'&&uuid.test(profile.tenantId)) &&
-        'expiresAtMs' in profile && typeof profile.expiresAtMs==='number' && Number.isSafeInteger(profile.expiresAtMs)&&profile.expiresAtMs>0 &&
-        'navigation' in profile && Array.isArray(profile.navigation) && profile.navigation.length===1 && profile.navigation[0]==='/overview') {
-        return {kind:'authenticated',csrfToken:data.csrfToken,profile:profile as unknown as StaffProfile};
+    if (typeof data === 'object' && data !== null && !Array.isArray(data) &&
+      ['csrfToken,expiresAtMs,navigation,staffId,tenantId','csrfToken,departmentAccess,expiresAtMs,navigation,staffId,tenantId'].includes(Object.keys(data).sort().join(','))) {
+      const {csrfToken,staffId,tenantId,expiresAtMs,navigation,departmentAccess}=data as Record<string,unknown>;
+      const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+      if(typeof csrfToken==='string' && /^[A-Za-z0-9_-]{43}$/.test(csrfToken) &&
+        typeof staffId==='string' && uuid.test(staffId) &&
+        (tenantId===null||typeof tenantId==='string'&&uuid.test(tenantId)) &&
+        typeof expiresAtMs==='number' && Number.isSafeInteger(expiresAtMs) && expiresAtMs>0 &&
+        Number.isFinite(new Date(expiresAtMs).getTime()) &&
+        Array.isArray(navigation) && navigation[0]==='/overview' &&
+        navigation.length<=workspacePaths.length && new Set(navigation).size===navigation.length &&
+        navigation.slice(1).every(item=>tenantId!==null && workspacePaths.includes(item)) &&
+        (departmentAccess===undefined || (!!tenantId && validDepartmentAccess(departmentAccess)))) {
+        return {kind:'authenticated',csrfToken,profile:{staffId,tenantId,expiresAtMs,navigation,...(departmentAccess&&{departmentAccess})}};
       }
     }
   } catch { /* Render a safe retry state, never a fabricated session. */ }

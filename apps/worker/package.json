@@ -3,6 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Planned application boundary; no framework bootstrap yet."
+  "description": "Disabled-by-default synthetic internal AI job boundary.",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js"
+  },
+  "dependencies": { "@nukhbapay/application": "workspace:*", "jose": "6.2.17" },
+  "devDependencies": { "@types/node": "24.19.2", "typescript": "6.0.2" }
 }
 

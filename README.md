@@ -1,95 +1,162 @@
-# Nukhbapay
+# NukhbaPay Backend — Core API, AI Service & Infrastructure Platform
 
-13 November 2026: the final [browser/BFF security structure gate](docs/security/browser-bff-boundary.md) is verified, closing the three-branch local integration blocker. Structure validation requires the existing installed Node/TypeScript workspace tools as well as Python; it installs nothing. Local development acceptance is GO. Real Auth0 login, persistent IAM and privileged staff operations remain disabled.
+[![CI/CD Pipeline](https://github.com/alzawyah5-eng/NukhbaPayBackend/actions/workflows/ci.yml/badge.svg)](https://github.com/alzawyah5-eng/NukhbaPayBackend/actions/workflows/ci.yml)
+[![Node Version](https://img.shields.io/badge/Node-24.x-brightgreen.svg)](https://nodejs.org/)
+[![pnpm Version](https://img.shields.io/badge/pnpm-10.x-orange.svg)](https://pnpm.io/)
+[![Python Version](https://img.shields.io/badge/Python-3.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://python.org/)
+[![NestJS](https://img.shields.io/badge/NestJS-11.x-E0234E.svg)](https://nestjs.com/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16.x-336791.svg)](https://postgresql.org/)
 
-13 November 2026 Brick 4A: [ADR 0026](docs/adr/0026-draft-catalogue-publication-candidates.md) adds deterministic immutable catalogue publication **drafts** from explicit synthetic snapshots. Candidates are always non-authorized and cannot be activated. Proposed migration 007 is unregistered, disposable-only and unapplied to development. No public catalogue route, live provider, real staff permission, quote, order or payment was added.
+The enterprise financial backend for the **NukhbaPay** digital goods, gift cards, and payments platform. Follows strict Hexagonal (Ports & Adapters) and Clean Architecture boundaries with exact minor-unit financial arithmetic, AI-assisted catalog matching with hard parameter guards, immutable transaction outbox, and zero-trust IAM.
 
-13 November 2026 registration: [ADR 0024](docs/adr/0024-registered-staff-session-migration.md) registers the already accepted transactional migration 006 wrapper in local source history. The reviewed SQL sidecars and frozen 004/005 migrations are unchanged. `pnpm db:verify:sources` is connection-free; guarded `db:migrate` and combined acceptance accept only verified random disposable targets and now execute registered 001–006. Nothing was applied to `nukhabapay_dev`.
+---
 
-The local staff foundation remains default-disabled and synthetic. [ADR 0022](docs/adr/0022-local-https-staff-server-sessions.md) supplies the minimal HTTPS BFF and actor/version-bound sessions; ADR 0023 supplies authority invalidation and migration security. Real Auth0 login, accepted approvals, APPLY, real staff onboarding and financial execution remain disabled. See the [migration runbook](docs/security/migration-security-rehearsal.md), [session runbook](docs/security/staff-server-sessions.md) and current verification evidence.
+## 🏗️ Architecture & Component Overview
 
-Current project naming is **Nukhbapay** / **nukhbapay** (ADR 0021). Packages use `@nukhbapay/*` and Python uses `nukhbapay_ai`. Fixed database/resource identifiers and historical evidence are preserved; see [the naming register](docs/naming-standardization.md).
-
-An incremental platform for AI-assisted catalog, provider comparison and pricing, with planned payment-app, CRM and kiosk clients.
-
-**Status: local Bricks 1, 2A, 2B and 3A verified; Brick 3B-1/3B-2 synthetic/internal integration and Brick 3B-3 global HTTP guards implemented.** Migration 004 is tested on disposable databases but is not applied to `nukhabapay_dev`, whose history remains 001–003. The deployed application registers only process liveness; protected acceptance operations exist only in test bootstrap. Real identity services, client interfaces, live integrations and financial execution remain unimplemented. Auth0 is preferred conditionally and unconfigured. Browser login and Brick 4 have not started. See [verification](docs/verification.md) for actual evidence and limitations.
-
-## Start here
-
-Latest follow-on: [ADR 0020](docs/adr/0020-gated-staff-approval-intake.md) implements gated internal synthetic approval intake and authoritative blocked-evidence reconciliation. It reuses 005's non-approved review/provenance/audit/receipt/outbox profile without a migration or grant change. Real MFA, accepted approvals, APPLY, real staff/provider login and deployed staff endpoints remain disabled. See verification.md for exact evidence and limitations.
-
-Latest follow-on: [ADR 0019](docs/adr/0019-secure-staff-workflow-reads.md) adds internal participant-scoped request detail/status/revision/review reads, separate default-deny read authorization, a SELECT-only disposable backend and committed audit. No new deployed route, normal-runtime grant, accepted approval, real MFA or staff mutation. Migration 004/005 remain unapplied to development; see the latest verification record for actual evidence.
-
-Latest local increment: registered migration 005 now provides restricted, immutable synthetic staff request/revision/review/provenance persistence and atomic audit/receipt/no-delivery outbox on verified disposable PostgreSQL targets. Existing IAM/catalogue credentials gain no rights; accepted privileged approvals, APPLY and operational MFA remain blocked. Neither 004 nor 005 is applied to development. See [ADR 0018](docs/adr/0018-registered-restricted-staff-workflow-persistence.md) and the latest [verification](docs/verification.md); earlier increment descriptions below are historical.
-
-Pure staff command/audit/receipt/idempotency contracts now accompany the policy foundation. Deterministic test-only transactions model replay, failures and uncertain acknowledgement; every result remains NOT_AUTHORIZED. No staff mutation, persistence, provider or endpoint is enabled. ADR 0012 and verification record the exact scope and limits.
-
-The separately authorized staff lifecycle policy foundation now models requests, independent approval requirements and lifecycle transitions in pure application code. Every result remains non-executable; current assurance and permission restrictions remain unchanged. No staff workflow, database command or endpoint is enabled. See ADR 0011 and the latest verification record.
-
-Global guards connect the existing verifier to Brick 3A's audited self-only operation through explicit trusted-code dependencies. Only exact reviewed GET liveness is public; missing permissions or services fail closed. The local runtime now composes verifier/IAM, checks internal readiness and owns startup/shutdown cleanup in explicit `local-synthetic` mode. It requires a `.invalid` issuer, loopback listener and injected synthetic JWKS transport. Default `disabled` opens no pools and rejects stray identity settings. The test-only controller remains excluded from deployment. Real provider/runtime activation, browser login and later bricks require separate approval. See ADRs 0007–0010 and verification. Root `pnpm.cmd api:build` and API tests build workspace dependencies first.
-
-1. Read [ARCHITECTURE.md](ARCHITECTURE.md) for runtime boundaries, workflows and design decisions.
-2. Read [docs/project-structure.md](docs/project-structure.md) for the actual file inventory.
-3. Run the synthetic price demonstration.
-4. Run the supplied financial and matching checks.
-5. Follow [docs/build-sequence.md](docs/build-sequence.md) for the current brick order and acceptance conditions. Brick 2B is complete within its documented local synthetic scope; Brick 3's identity-provider decision remains proposed and unconfigured.
-
-## Run the offline examples
-
-Use Node.js 24.x and Python 3.11 or later. The offline examples use standard libraries and require no package installation. The API uses the pinned pnpm workspace dependencies in `pnpm-lock.yaml`.
-
-The repository pins Node.js 24.22.2 in `.node-version` and pnpm in the root `package.json`. With Corepack available, install and verify the API using:
-
-```powershell
-corepack.cmd pnpm install --frozen-lockfile
-corepack.cmd pnpm api:build
-corepack.cmd pnpm api:typecheck
-corepack.cmd pnpm api:test
+```text
+backend/
+├── apps/
+│   ├── api/                     # NestJS Core HTTP API (Identity, Catalogue, Public Liveness, Guards)
+│   ├── ai-service/              # Python AI Matching, Model Gateways & Catalog Equivalence Guards
+│   ├── worker/                  # Background Worker (Outbox delivery, async jobs)
+│   └── admin-web/               # Node.js HTTPS BFF Portal (Auth0, Step-up MFA, Sessions)
+├── packages/
+│   ├── domain/                  # Pure TypeScript domain models, exact AED pricing arithmetic
+│   ├── application/             # Use cases, approval intake, catalog publication, synthetic assurance
+│   ├── database/                # PostgreSQL repositories, connection pools, migrations 001–006
+│   ├── contracts/               # Shared TypeScript schemas and RPC boundaries
+│   ├── provider-adapters/       # Integrations for upstream providers (IronGate, SSL Wireless, Sandbox)
+│   └── provider-contracts/      # Formal vendor API contracts and normalization types
+├── infra/                       # Local Docker Compose (PostgreSQL 16, Redis, Local Stack)
+├── scripts/                     # DB migration rehearsal, Auth0 enrollment, verification suites
+├── docs/                        # Architecture Decision Records (ADRs), runbooks, security profiles
+└── tests/                       # Acceptance and integration test suites
 ```
 
-Start the liveness-only API with `corepack.cmd pnpm api:start`. It binds to `127.0.0.1:3000` by default. Configuration is limited to `API_HOST` (an IP address literal) and `API_PORT` (1-65535). On other shells, invoke `corepack pnpm` instead of `corepack.cmd pnpm`.
+---
 
-## Run the local staff frontend
+## ⚡ Key Highlights & Principles
 
-From the repository root, run `corepack.cmd pnpm staff:dev`. This single command builds the frontend, reuses or creates a localhost HTTPS certificate without changing Windows trust, and starts the fictional UI preview at `https://localhost:3001/preview/overview`. Browser trust requires a separate explicit certificate-trust step; do not bypass certificate warnings. Staff sign-in remains disabled.
+1. **Exact Financial Mathematics**: Zero IEEE-754 floating-point drift. All money calculations in AED are stored and computed in integer minor units (fills) with explicit half-up rounding.
+2. **Hard Equivalence AI Guards**: AI models (Gemini / Claude / local models) provide *advisory suggestions only*. Hard deterministic parameter guards verify brand, currency, country code, face value, and restrictions before any catalog mapping can be published.
+3. **Deny-by-Default Identity**: Zero anonymous endpoints except verified liveness (`GET /health`). Staff sessions are actor/version-bound with MFA observation.
+4. **Disposable Migration Acceptance**: Database migrations (001–006) are tested against ephemeral random target databases before promotion.
+5. **Audited Transactional Outbox**: Atomic database state mutation with outbox records ensuring reliable messaging and reconciliation.
+
+---
+
+## 🚀 Quick Start & Installation
+
+### Prerequisites
+
+- **Node.js**: `v24.x` (pinned in `.node-version`)
+- **pnpm**: `v10.x` (`corepack enable` or `npm install -g pnpm`)
+- **Python**: `3.11+` or `3.12+` or `3.13+`
+- **Docker**: For local PostgreSQL and Redis (optional for offline tests)
+
+### 1. Clone & Install Dependencies
 
 ```bash
-node --experimental-strip-types scripts/demo.ts
-node --experimental-strip-types --test packages/domain/test/*.test.ts packages/provider-adapters/test/*.test.ts
-python3 -m unittest discover -s apps/ai-service/tests -v
-python3 scripts/check_structure.py
+# Clone the repository
+git clone https://github.com/alzawyah5-eng/NukhbaPayBackend.git
+cd NukhbaPayBackend
+
+# Install pinned workspace dependencies
+pnpm install --frozen-lockfile
 ```
 
-Equivalent npm scripts: `npm run demo`, `npm test`, `npm run test:ai`, and `npm run check:architecture`. On systems where Python is named `python` or `py`, substitute that command.
+### 2. Environment Configuration
 
-The price demonstration compares three synthetic offers for one AE/AED digital gift card. It selects an eligible AED 97.00 provider, displays AED 102.00 total and computes AED 2.77 contribution under explicitly supplied illustrative costs. It does not determine actual tax treatment.
+Copy `.env.example` to `.env`:
 
-## Included versus planned
+```bash
+cp .env.example .env
+```
 
-| Area | Current state |
-| --- | --- |
-| Exact AED money and pricing example | Implemented and runnable |
-| Synthetic catalog adapters | Implemented and runnable |
-| Hard product-equivalence guard and advisory provenance | Implemented and runnable; no model calls |
-| Public schemas and private example economics | Supplied design contracts |
-| Architecture, data model and decisions | Documented |
-| API | NestJS bootstrap, reviewed public liveness, global deny-by-default staff guards, bounded JSON parsing and test-only protected HTTP acceptance; identity services unconfigured by default |
-| Worker, CRM, kiosk and mobile applications | Boundaries and module READMEs only |
-| Shared application use cases | Internal synthetic import/read, staff identity resolution, authorization and audit ports implemented; downstream use cases planned |
-| Database migrations and repositories | Catalogue 001–003 applied locally; corrected IAM 004 tested on disposable PostgreSQL only |
-| Transactional outbox | Planned |
-| Local PostgreSQL/Redis containers | Optional configuration; not required by the examples |
-| API framework dependencies, pnpm lockfile and strict TypeScript checking | Pinned and verified for the API package; worker framework remains unimplemented |
-| Production hosting and external accounts | Not provisioned |
+Review database credentials, API host, port, and Auth0 settings in `.env`.
 
-## Repository layout
+---
 
-`apps/` contains runtime and client boundaries. `packages/` contains reusable backend logic, contracts and infrastructure. `infra/` describes environment setup. `docs/` records architecture and operations. `tests/` reserves integration, contract and security suites.
+## 🧪 Running Verification & Tests
 
-The offline examples need no package install. API/database/application dependencies are installed through the pnpm workspace and pinned by `pnpm-lock.yaml`; the pnpm workspace manifest also records package membership. No Git repository currently exists; the recovery used a reviewed local archive checkpoint. The Python AI project remains a separately managed runtime; add its dependency lock when model/HTTP dependencies are selected.
+### Offline Financial & Provider Tests
+Runs exact financial calculations and vendor integration adapters in memory without requiring a database:
 
-## Important limits
+```bash
+pnpm test
+```
 
-The TypeScript demonstration supports only the documented synthetic AED gift-card case. The Python guard supports gift-card and prepaid-airtime equivalence, not transfer, bill or ticket semantics. Model suggestions never grant financial authority. Node's native TypeScript execution does not perform a TypeScript compiler check. The liveness route checks no dependencies and establishes no production readiness.
+### Python AI Service & Equivalence Tests
+Runs 30 unit tests covering confidence review, circuit breaker fallback, hard mismatch rejections, and catalog normalization:
 
-Do not connect live credentials until identity, persistence, transaction integrity, provider-specific contracts and deployment controls are implemented and assessed.
+```bash
+pnpm test:ai
+# or: python -m unittest discover -s apps/ai-service/tests -v
+```
+
+### Architecture Scaffold Validation
+Validates package structure, boundaries, and prevents forbidden circular or privileged imports:
+
+```bash
+pnpm check:architecture
+# or: python scripts/check_structure.py
+```
+
+### Financial Pricing Simulation Demo
+Runs an offline simulation of provider comparison, waterfall calculations, contribution margins, and customer quote generation:
+
+```bash
+pnpm demo
+```
+
+---
+
+## 🖥️ Running Services
+
+### Start NestJS API
+```bash
+# Build all dependent packages and API
+pnpm api:build
+
+# Run API in development
+pnpm api:start
+```
+API binds to `http://127.0.0.1:3000` by default.
+
+### Start Local Infrastructure (PostgreSQL & Redis)
+```bash
+docker compose -f infra/local/docker-compose.yml up -d
+```
+
+### Database Migrations
+```bash
+# Run verified migrations against configured database
+pnpm db:migrate
+```
+
+---
+
+## 🔄 CI/CD Pipeline
+
+The repository includes a comprehensive **GitHub Actions CI/CD pipeline** (`.github/workflows/ci.yml`):
+
+- **Node.js Test Matrix**: Pinned dependency caching, domain & provider tests, TypeScript compile-time typecheck, and application builds.
+- **Python AI Suite**: Runs AI gateway and equivalence guard unit tests.
+- **Scaffold Check**: Automatically enforces architecture boundaries on every PR.
+- **Docker Compose Validation**: Ensures infrastructure definitions are syntax-valid.
+
+---
+
+## 🔒 Security Runbooks & Documentation
+
+- [Architecture Overview](ARCHITECTURE.md)
+- [Project Inventory & Structure](docs/project-structure.md)
+- [Verification Evidence & Limits](docs/verification.md)
+- [ADR Index (Decisions 0001–0026)](docs/adr/)
+- [Migration Rehearsal Runbook](docs/security/migration-security-rehearsal.md)
+
+---
+
+## 📄 License & Ownership
+
+Proprietary © NukhbaPay. All rights reserved.

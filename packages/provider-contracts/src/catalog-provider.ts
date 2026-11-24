@@ -28,5 +28,5 @@ export interface ProviderOffer {
 /** Production adapters must validate their external input before emitting this contract. */
 export interface CatalogProvider {
   readonly providerId: string;
-  fetchCatalog(): Promise<readonly ProviderOffer[]>;
+  fetchCatalog(signal?: AbortSignal): Promise<readonly ProviderOffer[]>;
 }

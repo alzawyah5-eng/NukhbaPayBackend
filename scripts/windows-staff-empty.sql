@@ -1,0 +1,10 @@
+SELECT NOT EXISTS (SELECT FROM pg_catalog.pg_namespace WHERE nspname NOT IN ('information_schema','public') AND left(nspname,3)<>'pg_')
+   AND NOT EXISTS (SELECT FROM pg_catalog.pg_class WHERE relnamespace='public'::regnamespace)
+   AND NOT EXISTS (SELECT FROM pg_catalog.pg_proc WHERE pronamespace='public'::regnamespace)
+   AND NOT EXISTS (SELECT FROM pg_catalog.pg_type WHERE typnamespace='public'::regnamespace)
+   AND NOT EXISTS (SELECT FROM pg_catalog.pg_extension WHERE extname<>'plpgsql')
+   AND NOT EXISTS (SELECT FROM pg_catalog.pg_event_trigger)
+   AND NOT EXISTS (SELECT FROM pg_catalog.pg_largeobject_metadata)
+   AND NOT EXISTS (SELECT FROM pg_catalog.pg_default_acl)
+   AND NOT EXISTS (SELECT FROM pg_catalog.pg_foreign_server)
+   AND NOT EXISTS (SELECT FROM pg_catalog.pg_publication);

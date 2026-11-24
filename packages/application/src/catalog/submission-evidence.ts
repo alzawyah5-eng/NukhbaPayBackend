@@ -63,14 +63,22 @@ export async function prepareSyntheticPriceSubmission(deps:{
     const m=c.membership,p=c.principal;
     if(!p||p.staffStatus!=="ACTIVE"||p.identityStatus!=="ACTIVE"||!m||m.status!=="ACTIVE"||m.tenantId!==tenantId||
       !/^[0-9a-f-]{36}$/.test(p.staffId))throw new Error("Submission denied");
+    const checkedAt=deps.now().getTime();
+    if(!Number.isFinite(checkedAt)||checkedAt<now||checkedAt>=identity.security.expiresAt*1000)throw new Error("Submission denied");
     const assigned=m.roleGrants.filter(g=>g.revokedAt===null);
     if(assigned.some(g=>g.scope!=="TENANT"||rolePermissionCodes(g.roleCode)===null||g.roleCode==="PRICING_APPROVER")||!assigned.some(g=>g.roleCode==="PRICING_EDITOR"&&
-      Date.parse(g.grantedAt)<=now&&(g.expiresAt===null||Date.parse(g.expiresAt)>now)))throw new Error("Submission denied");
+      Date.parse(g.grantedAt)<=now&&(g.expiresAt===null||Date.parse(g.expiresAt)>checkedAt)))throw new Error("Submission denied");
     return c;
   };
   const context=await resolve(),stamp=JSON.stringify(context,(_,v:unknown)=>typeof v==="bigint"?v.toString():v);
   const submittedAt=deps.now().toISOString(),deadline=Math.min(Date.parse(submittedAt)+5000,identity.security.expiresAt*1000);
-  const revalidate=async()=>{try{return deps.now().getTime()<deadline&&JSON.stringify(await resolve(),(_,v:unknown)=>typeof v==="bigint"?v.toString():v)===stamp;}catch{return false;}};
+  const revalidate=async()=>{
+    try {
+      if(!(deps.now().getTime()<deadline))return false;
+      const current=await resolve(),checkedAt=deps.now().getTime();
+      return checkedAt>=Date.parse(submittedAt)&&checkedAt<deadline&&JSON.stringify(current,(_,v:unknown)=>typeof v==="bigint"?v.toString():v)===stamp;
+    } catch {return false;}
+  };
   await recordSecurityAuditEvents(deps.auditWriter,[{occurredAt:submittedAt,actorStaffId:context.principal!.staffId,tenantId,
     action:"AUTHORIZATION_DECISION",outcome:"SUCCESS",targetType:"AUTHORIZATION",targetId:null,requestId:null,reasonCode:"NONE"}]);
   if(!await revalidate())throw new Error("Submission denied");

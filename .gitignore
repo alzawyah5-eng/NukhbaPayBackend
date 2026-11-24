@@ -1,4 +1,8 @@
+# Dependencies
 node_modules/
+.pnpm-store/
+
+# Build and compilation outputs
 dist/
 dist-test/
 build/
@@ -6,31 +10,12 @@ coverage/
 *.tsbuildinfo
 .cache/
 .turbo/
-.pnpm-store/
+.wrangler/
+
+# Environment and secrets
 .env
 .env.*
 !.env.example
-__pycache__/
-*.py[cod]
-.venv/
-.pytest_cache/
-.mypy_cache/
-.DS_Store
-Thumbs.db
-.idea/
-.vscode/
-.agents/
-.codex/
-.aws/
-.ssh/
-*.suo
-*.user
-*.log
-*.pid
-*.sock
-data/local/
-artifacts/
-.local/
 *.local
 secrets/
 certs/
@@ -44,6 +29,34 @@ certs/
 *.csr
 *.jks
 *.keystore
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+
+# OS and Editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+.agents/
+.codex/
+.aws/
+.ssh/
+*.suo
+*.user
+*.log
+*.pid
+*.sock
+
+# Local runtime & test artifacts
+data/local/
+artifacts/
+.local/
 *.clixml
 *.dump
 *.backup
@@ -55,6 +68,8 @@ certs/
 *.tfstate.*
 backups/
 recovery-checkpoints/
+.recovery-checkpoints/
+nukhabapay-worktrees/
 *.zip
 *.tar
 *.tar.gz

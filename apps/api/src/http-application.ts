@@ -1,4 +1,7 @@
 import { PublishedCatalogueHttpBoundary, isPublishedCatalogueHandler, type CatalogueHttpDependencies } from "./modules/catalog/published-catalogue-http.js";
+import {StaffAdministrationHttpBoundary,isStaffAdministrationHandler} from './modules/admin/staff-admin-http.js';
+import {StaffCatalogueHttpBoundary,isStaffCatalogueHandler} from './modules/admin/staff-catalogue-http.js';
+import type {StaffManagementService,StaffCatalogueService} from '@nukhbapay/application';
 import { Logger, type LoggerService, type Type } from "@nestjs/common";
 import { NestFactory, Reflector } from "@nestjs/core";
 import { ExpressAdapter, type NestExpressApplication } from "@nestjs/platform-express";
@@ -45,6 +48,8 @@ export interface ApiApplicationOptions {
   readonly identity?: IdentityBoundaryDependencies;
   readonly logger?: LoggerService | false;
   readonly catalogue?: CatalogueHttpDependencies;
+  readonly staffAdministration?:StaffManagementService;
+  readonly staffCatalogue?:StaffCatalogueService;
 }
 
 export async function createApiApplication(options: ApiApplicationOptions = {}): Promise<NestExpressApplication> {
@@ -71,8 +76,10 @@ export async function createApiApplication(options: ApiApplicationOptions = {}):
   const dependencies = Object.freeze({ ...options.identity });
   const authentication=new AuthenticationGuard(reflector,dependencies),authorization=new AuthorizationGuard(reflector,dependencies);
   const catalogue=new PublishedCatalogueHttpBoundary(options.catalogue);
+  const staffAdministration=new StaffAdministrationHttpBoundary(options.staffAdministration);
+  const staffCatalogue=new StaffCatalogueHttpBoundary(options.staffCatalogue);
   app.useGlobalGuards({canActivate:context=>isPublishedCatalogueHandler(context)?catalogue.authenticate(context):authentication.canActivate(context)},
-    {canActivate:context=>isPublishedCatalogueHandler(context)?catalogue.authorize(context):authorization.canActivate(context)});
+    {canActivate:context=>isPublishedCatalogueHandler(context)?catalogue.authorize(context):isStaffAdministrationHandler(context)?staffAdministration.authorize(context):isStaffCatalogueHandler(context)?staffCatalogue.authorize(context):authorization.canActivate(context)});
   app.useGlobalFilters(new SafeExceptionFilter());
 
   const server = app.getHttpServer();

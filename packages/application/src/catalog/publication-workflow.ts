@@ -35,16 +35,24 @@ export interface SyntheticPublicationAuthority {
  /** Trusted fixture composition only. No environment or request-selected permission override. */
  allows(context:StaffAuthorizationContext,permission:SyntheticPublicationPermission):Promise<boolean>;
 }
-export async function prepareSyntheticPublicationCommand(deps:SyntheticPublicationAuthority,identity:VerifiedStaffIdentity,input:PublicationCommand):Promise<PublicationCommandTicket>{
- if(deps.capability!=="ISOLATED_SYNTHETIC_PUBLICATION_ONLY"||!isVerifiedStaffIdentity(identity)||!new URL(identity.issuer).hostname.endsWith(".invalid"))throw new Error("Publication denied");
+export function normalizePublicationCommand(input:unknown):PublicationCommand {
  const keys=["action","tenantId","productId","candidateId","candidateVersion","expectedActiveId","rollbackSourceId","idempotencyKey","reason"];
- if(!input||Object.keys(input).length!==keys.length||Object.keys(input).some(k=>!keys.includes(k)))throw new Error("Invalid publication command");
- const c=Object.freeze({...input});
+ if(!input||typeof input!=="object"||Array.isArray(input)||Object.keys(input).length!==keys.length||keys.some(k=>!Object.hasOwn(input,k)))throw new Error("Invalid publication command");
+ const {action,tenantId,productId,candidateId,candidateVersion,expectedActiveId,rollbackSourceId,idempotencyKey,reason}=input as PublicationCommand;
+ const c=Object.freeze({action,tenantId,productId,candidateId,candidateVersion,expectedActiveId,rollbackSourceId,idempotencyKey,reason});
  if(!["APPROVE","ACTIVATE","ROLLBACK"].includes(c.action)||![c.tenantId,c.productId,c.idempotencyKey].every(v=>typeof v==="string"&&uuid.test(v))||
- !hex.test(c.candidateId)||!Number.isSafeInteger(c.candidateVersion)||c.candidateVersion<1||
- (c.expectedActiveId!==null&&!uuid.test(c.expectedActiveId))||(c.rollbackSourceId!==null&&!uuid.test(c.rollbackSourceId))||
+ (typeof c.candidateId!=="string"||!hex.test(c.candidateId))||!Number.isSafeInteger(c.candidateVersion)||c.candidateVersion<1||
+ (c.expectedActiveId!==null&&(typeof c.expectedActiveId!=="string"||!uuid.test(c.expectedActiveId)))||
+ (c.rollbackSourceId!==null&&(typeof c.rollbackSourceId!=="string"||!uuid.test(c.rollbackSourceId)))||
  (c.action==="ROLLBACK"?(!c.rollbackSourceId||!c.expectedActiveId||typeof c.reason!=="string"||c.reason.trim()!==c.reason||c.reason.length<3||c.reason.length>256||/[\x00-\x1f\x7f]/.test(c.reason)):
  (c.rollbackSourceId!==null||c.reason!==null))||(c.action==="APPROVE"&&c.expectedActiveId!==null))throw new Error("Invalid publication command");
+ return c;
+}
+
+/** The admission result contains no mutation ticket. */
+export async function inspectSyntheticPublicationCommand(deps:SyntheticPublicationAuthority,identity:VerifiedStaffIdentity,input:unknown){
+ if(deps.capability!=="ISOLATED_SYNTHETIC_PUBLICATION_ONLY"||!isVerifiedStaffIdentity(identity)||!new URL(identity.issuer).hostname.endsWith(".invalid"))throw new Error("Publication denied");
+ const c=normalizePublicationCommand(input);
  const permission:SyntheticPublicationPermission=c.action==="APPROVE"?"pricing.approve":c.action==="ACTIVATE"?"pricing.activate":"publication.rollback";
  const role=c.action==="APPROVE"?"PRICING_APPROVER":"PUBLICATION_OPERATOR";
  const fresh=async()=>{
@@ -54,17 +62,41 @@ export async function prepareSyntheticPublicationCommand(deps:SyntheticPublicati
   if(!p||!uuid.test(p.staffId)||p.staffStatus!=="ACTIVE"||p.identityStatus!=="ACTIVE"||!m||m.status!=="ACTIVE"||m.tenantId!==c.tenantId)throw new Error("Publication denied");
   const assigned=m.roleGrants.filter(g=>g.revokedAt===null);
   if(assigned.some(g=>g.scope!=="TENANT"||(g.roleCode!=="PUBLICATION_OPERATOR"&&findRoleDefinition(g.roleCode)?.scope!=="TENANT")||["PRICING_EDITOR",role==="PRICING_APPROVER"?"PUBLICATION_OPERATOR":"PRICING_APPROVER"].includes(g.roleCode))||
-   !assigned.some(g=>g.roleCode===role&&Date.parse(g.grantedAt)<=time&&(g.expiresAt===null||Date.parse(g.expiresAt)>time))||!await deps.allows(context,permission))throw new Error("Publication denied");
+   !await deps.allows(context,permission))throw new Error("Publication denied");
+  const checkedAt=deps.now().getTime();
+  if(!Number.isFinite(checkedAt)||checkedAt<time||checkedAt>=identity.security.expiresAt*1000||
+   !assigned.some(g=>g.roleCode===role&&Date.parse(g.grantedAt)<=time&&(g.expiresAt===null||Date.parse(g.expiresAt)>checkedAt)))
+    throw new Error("Publication denied");
   return context;
  };
  const context=await fresh();
  const stamp=(v:unknown)=>JSON.stringify(v,(_,x:unknown)=>typeof x==="bigint"?x.toString():x),initial=stamp(context);
- const staffId=context.principal!.staffId,occurredAt=deps.now().toISOString(),deadline=Math.min(Date.parse(occurredAt)+5000,identity.security.expiresAt*1000);
- const revalidate=async()=>{try{return deps.now().getTime()<deadline&&stamp(await fresh())===initial;}catch{return false;}};
+ const staffId=context.principal!.staffId;
+ const authorityDigest=createHash("sha256").update(initial).digest("hex");
+ const commandDigest=createHash("sha256").update(JSON.stringify(["SYNTHETIC_PUBLICATION_COMMAND_V1",c.action,c.tenantId,c.productId,c.candidateId,c.candidateVersion,c.expectedActiveId,c.rollbackSourceId,c.idempotencyKey,c.reason,staffId,identity.issuer,identity.subject])).digest("hex");
+ return Object.freeze({command:c,staffId,permission,authorityDigest,commandDigest,authzVersion:context.principal!.authzVersion.toString(),
+  membershipVersion:context.membership!.version.toString(),revalidate:async()=>stamp(await fresh())===initial});
+}
+
+export async function prepareSyntheticPublicationCommand(deps:SyntheticPublicationAuthority,identity:VerifiedStaffIdentity,input:PublicationCommand,
+ browser?:Readonly<{commandDigest:string;authorityDigest:string;revalidate():Promise<boolean>}>):Promise<PublicationCommandTicket>{
+ const admission=await inspectSyntheticPublicationCommand(deps,identity,input);
+ const {command:c,staffId,permission,commandDigest,authzVersion,membershipVersion}=admission;
+ if(browser&&(browser.commandDigest!==commandDigest||browser.authorityDigest!==admission.authorityDigest))throw new Error("Publication denied");
+ const occurredAt=deps.now().toISOString(),deadline=Math.min(Date.parse(occurredAt)+5000,identity.security.expiresAt*1000);
+ const revalidate=async()=>{
+  try {
+   if (!(deps.now().getTime()<deadline)) return false;
+   if (!await admission.revalidate() || (browser && !await browser.revalidate())) return false;
+   const checkedAt=deps.now().getTime();
+   return checkedAt>=Date.parse(occurredAt)&&checkedAt<deadline;
+  } catch {return false;}
+ };
+ if(browser&&!await browser.revalidate())throw new Error("Publication denied");
  await recordSecurityAuditEvents(deps.auditWriter,[{occurredAt,actorStaffId:staffId,tenantId:c.tenantId,action:"AUTHORIZATION_DECISION",outcome:"SUCCESS",targetType:"AUTHORIZATION",targetId:null,requestId:c.idempotencyKey,reasonCode:"NONE"}]);
  if(!await revalidate())throw new Error("Publication denied");
- const commandDigest=createHash("sha256").update(JSON.stringify(["SYNTHETIC_PUBLICATION_COMMAND_V1",c.action,c.tenantId,c.productId,c.candidateId,c.candidateVersion,c.expectedActiveId,c.rollbackSourceId,c.idempotencyKey,c.reason,staffId,identity.issuer,identity.subject])).digest("hex");
- const ticket=Object.freeze({command:c,staffId,issuer:identity.issuer,subject:identity.subject,permission,authzVersion:context.principal!.authzVersion.toString(),membershipVersion:context.membership!.version.toString(),occurredAt,commandDigest,execution:"NOT_AUTHORIZED" as const,currentTimeMs:()=>deps.now().getTime(),revalidate});
+ const ticket=Object.freeze({command:c,staffId,issuer:identity.issuer,subject:identity.subject,permission,authzVersion,membershipVersion,
+  occurredAt,commandDigest,execution:"NOT_AUTHORIZED" as const,currentTimeMs:()=>deps.now().getTime(),revalidate});
  tickets.add(ticket);return ticket;
 }
 

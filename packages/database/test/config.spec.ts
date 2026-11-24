@@ -86,6 +86,19 @@ test("integration admin configuration is constrained to the local maintenance da
   }
 });
 
+test("catalogue and IAM credentials cannot silently target different PostgreSQL ports", () => {
+  for (const field of ["DB_RUNTIME_URL", "DB_IMPORT_URL"] as const) {
+    assert.throws(() => parseDatabaseConfig({ ...urls, [field]: urls[field].replace(":5432/", ":55437/") }), /same local database/);
+  }
+  const reader = urls.DB_RUNTIME_URL.replace("nukhabapay_runtime", "nukhabapay_identity_reader");
+  const writer = urls.DB_RUNTIME_URL.replace("nukhabapay_runtime", "nukhabapay_identity_writer");
+  for (const field of ["DB_IDENTITY_READER_URL", "DB_IDENTITY_WRITER_URL"] as const) {
+    const env = { ...urls, DB_IDENTITY_READER_URL: reader, DB_IDENTITY_WRITER_URL: writer };
+    assert.throws(() => parseIdentityDatabaseConfig({ ...env, [field]: env[field].replace(":5432/", ":55437/") }), /same local database/);
+  }
+  assert.doesNotThrow(() => parseDatabaseConfig({ ...urls, DB_IMPORT_URL: urls.DB_IMPORT_URL.replace(":5432/", "/") }));
+});
+
 test("identity database roles target the catalog database and remain distinct", () => {
   const readerUrl = new URL(urls.DB_RUNTIME_URL);
   readerUrl.username = "nukhabapay_identity_reader";

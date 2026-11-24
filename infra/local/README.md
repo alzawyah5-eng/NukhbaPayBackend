@@ -1,5 +1,7 @@
 # Local infrastructure
 
+For an isolated Windows PostgreSQL fixture, see the [Docker Desktop setup and test commands](docker-desktop.md).
+
 Current project name: **Nukhbapay**. The existing Compose project/storage locator is deliberately preserved; see [naming compatibility](../../docs/naming-standardization.md) before operating any existing container or volume.
 
 PostgreSQL catalogue and local synthetic IAM/workflow foundations are tested on disposable targets. The existing development database retains its legacy name and migration history 001 through 003; migrations 004/005 must not be run there. Container operation is separate from the existing local PostgreSQL acceptance cluster. Do not start another server against an occupied port or initialize existing storage as a naming operation.

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  authorizeIsolatedStaffRead,
   authorizeStaffAccess,
   resolveStaffIdentity,
   resolveStaffTenantContext,
@@ -63,9 +64,19 @@ function context(
 }
 
 test("the fixed catalogue has explicit scopes and no wildcard or inherited grants", () => {
-  assert.equal(ROLE_CATALOG.length, 12);
-  assert.equal(PERMISSION_CATALOG.length, 23);
+  assert.equal(ROLE_CATALOG.length, 14);
+  assert.equal(PERMISSION_CATALOG.length, 25);
   assert.equal(PERMISSION_CATALOG.some(({ code }) => code.includes("*")), false);
+  for (const permissionCode of ["platform.sessions.revoke", "platform.sessions.revoke_all", "platform.staff.suspend"]) {
+    const definition = PERMISSION_CATALOG.find(({code}) => code === permissionCode);
+    assert.equal(definition?.scope, "PLATFORM");
+    assert.equal(definition?.activationPhase, "3D");
+    assert.deepEqual(authorizeStaffAccess(context([], [grant("SECURITY_ADMIN", "PLATFORM")]), { permissionCode, scope:"PLATFORM", now }),
+      { allowed:false, reason:"PERMISSION_INACTIVE" });
+    assert.deepEqual(authorizeStaffAccess(context([grant("TENANT_ADMIN", "TENANT")]), { permissionCode, scope:"TENANT", now,
+      tenantId:tenantA, objectTenantId:tenantA }), { allowed:false, reason:"SCOPE_MISMATCH" });
+  }
+  assert.equal(PERMISSION_CATALOG.find(({code}) => code === "tenant.staff.suspend")?.activationPhase,"3C");
   assert.deepEqual(rolePermissionCodes("CATALOG_OPERATOR"), [
     "catalog.read",
     "catalog.import.request",
@@ -87,6 +98,28 @@ test("the fixed catalogue has explicit scopes and no wildcard or inherited grant
     "pricing.approve",
   ]);
   assert.equal(rolePermissionCodes("SUPER_ADMIN"), null);
+});
+
+test("isolated management reads require the exact active viewer, tenant, and role grant", () => {
+  const scope = {staffId, tenantId:tenantA};
+  const viewer = grant("TENANT_STAFF_VIEWER", "TENANT", {expiresAt:"2026-11-11T00:00:00.000Z"});
+  const staffContext = context([viewer]);
+  for (const permissionCode of ["tenant.staff.read", "tenant.audit.read"]) {
+    const request = {permissionCode, scope:"TENANT" as const, now, tenantId:tenantA, objectTenantId:tenantA};
+    assert.equal(authorizeIsolatedStaffRead(staffContext, request, scope).allowed, true);
+    assert.equal(authorizeStaffAccess(staffContext, request).reason, "PERMISSION_INACTIVE");
+    assert.equal(authorizeIsolatedStaffRead(context(), request, scope).allowed, false);
+    assert.equal(authorizeIsolatedStaffRead(context([grant("TENANT_ADMIN", "TENANT")]), request, scope).allowed, false);
+    assert.equal(authorizeIsolatedStaffRead(context([viewer], [], {...activePrincipal, staffId:otherStaffId}), request, scope).allowed, false);
+    assert.equal(authorizeIsolatedStaffRead(context([viewer], [], activePrincipal, "SUSPENDED"), request, scope).allowed, false);
+    assert.equal(authorizeIsolatedStaffRead(staffContext, {...request, objectTenantId:tenantB}, scope).allowed, false);
+    assert.equal(authorizeIsolatedStaffRead(staffContext, {...request, now:viewer.expiresAt!}, scope).allowed, false);
+    assert.equal(authorizeIsolatedStaffRead(context([{...viewer, revokedAt:now}]), request, scope).allowed, false);
+  }
+  for (const permissionCode of ["tenant.staff.suspend", "tenant.access.request", "platform.sessions.revoke", "catalog.read"]) {
+    assert.equal(authorizeIsolatedStaffRead(staffContext, {permissionCode, scope:"TENANT", now,
+      tenantId:tenantA, objectTenantId:tenantA}, scope).allowed, false);
+  }
 });
 
 test("only an active staff member can read their own self-scope", () => {

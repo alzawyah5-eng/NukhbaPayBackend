@@ -7,6 +7,12 @@ export type StaffLifecycleOperation =
   | Readonly<{ kind: "SUSPEND" | "REACTIVATE"; target: "STAFF" | "MEMBERSHIP" }>
   | Readonly<{ kind: "REVOKE"; target: "MEMBERSHIP" }>
   | Readonly<{ kind: "REVOKE"; target: "GRANT"; grantId: string }>;
+
+/** Every accepted effect selector must be represented in the canonical intent digest. */
+export function hasStaffLifecycleOperationFields(operation: StaffLifecycleOperation): boolean {
+  const keys = operation.target === "GRANT" ? ["kind", "target", "grantId"] : ["kind", "target"];
+  return Reflect.ownKeys(operation).length === keys.length && keys.every(key => Object.hasOwn(operation, key));
+}
 export type AccessRequestState = "DRAFT" | "SUBMITTED" | "APPROVED" | "REJECTED" | "CANCELLED" | "EXPIRED" | "SUPERSEDED" | "APPLIED";
 export type AccessRequestEvent = "SUBMIT" | "RECORD_APPROVALS" | "REJECT" | "CANCEL" | "EXPIRE" | "SUPERSEDE" | "APPLY";
 export type ApprovalSlot = "SECURITY_ADMIN" | "GOVERNANCE_OWNER";

@@ -10,7 +10,7 @@ test('session client distinguishes denied, expired, unavailable and malformed re
   try {
     for (const [status, kind] of [[401, 'anonymous'], [403, 'forbidden'], [503, 'unavailable']] as const) {
       globalThis.fetch = async (url, init) => {
-        assert.equal(url, '/auth/session'); assert.equal(init?.credentials, 'same-origin'); assert.equal(init?.cache, 'no-store');
+        assert.equal(url, '/auth/workspace'); assert.equal(init?.credentials, 'same-origin'); assert.equal(init?.cache, 'no-store');
         return new Response('{}', { status });
       };
       assert.deepEqual(await readSession(), { kind });
@@ -19,14 +19,20 @@ test('session client distinguishes denied, expired, unavailable and malformed re
       globalThis.fetch = async () => Response.json(payload);
       assert.deepEqual(await readSession(), { kind: 'unavailable' });
     }
-    globalThis.fetch = async url => Response.json(url==='/auth/me'?profile:{ authenticated: true, csrfToken: 'A'.repeat(43) });
+    let calls=0;
+    globalThis.fetch = async url => {
+      assert.equal(url,'/auth/workspace');
+      calls++;
+      return Response.json({...profile,csrfToken:'A'.repeat(43)});
+    };
     assert.deepEqual(await readSession(), { kind: 'authenticated', csrfToken: 'A'.repeat(43),profile });
+    assert.equal(calls,1);
     globalThis.fetch = async () => { throw new Error('Offline'); };
     assert.deepEqual(await readSession(), { kind: 'unavailable' });
   } finally { globalThis.fetch = original; }
 });
 
-test('login is offered only by explicit BFF policy; profiles cannot grant management navigation or carry tokens',async()=>{
+test('login and known workspace routes come from the BFF; invalid profiles and token fields are rejected',async()=>{
   const original=globalThis.fetch;
   try {
     for(const loginPath of [null,'https://attacker.invalid','//attacker.invalid','/auth/login?tenant=forged']) {
@@ -34,15 +40,20 @@ test('login is offered only by explicit BFF policy; profiles cannot grant manage
     }
     globalThis.fetch=async(url,init)=>{assert.equal(url,'/auth/config');assert.equal(init?.cache,'no-store');return Response.json({loginPath:'/auth/login'});};
     assert.equal(await readLoginPath(),'/auth/login');
-    for(const payload of [{...profile,navigation:['/roles']},{...profile,staffId:'forged'},
-      {...profile,tenantId:'forged'},{...profile,expiresAtMs:NaN},{...profile,accessToken:'forged'}]) {
-      globalThis.fetch=async url=>Response.json(url==='/auth/me'?payload:{authenticated:true,csrfToken:'A'.repeat(43)});
+    globalThis.fetch=async()=>Response.json({...profile,navigation:['/overview','/roles','/staff/invite'],csrfToken:'A'.repeat(43)});
+    const managerSession=await readSession();
+    assert.equal(managerSession.kind,'authenticated');
+    if(managerSession.kind==='authenticated')assert.deepEqual(managerSession.profile.navigation,['/overview','/roles','/staff/invite']);
+    for(const payload of [{...profile,navigation:['/overview','/platform/roles']},
+      {...profile,navigation:['/overview','/roles','/roles']},{...profile,staffId:'forged'},
+      {...profile,tenantId:null,navigation:['/overview','/staff']},{...profile,tenantId:'forged'},
+      {...profile,expiresAtMs:NaN},{...profile,accessToken:'forged'}]) {
+      globalThis.fetch=async()=>Response.json({...payload,csrfToken:'A'.repeat(43)});
       assert.deepEqual(await readSession(),{kind:'unavailable'});
     }
-    for(const [status,kind]of [[401,'anonymous'],[403,'forbidden'],[503,'unavailable']]as const) {
-      globalThis.fetch=async url=>url==='/auth/me'?new Response(null,{status}):Response.json({authenticated:true,csrfToken:'A'.repeat(43)});
-      assert.deepEqual(await readSession(),{kind});
-    }
+    const authorized={...profile,navigation:['/overview','/staff','/audit']};
+    globalThis.fetch=async()=>Response.json({...authorized,csrfToken:'A'.repeat(43)});
+    assert.deepEqual(await readSession(),{kind:'authenticated',csrfToken:'A'.repeat(43),profile:authorized});
     assert.equal(sessionExpiryDelay(1000,1100),0);assert.equal(sessionExpiryDelay(2000,1000),1000);
   }finally{globalThis.fetch=original;}
 });

@@ -25,6 +25,7 @@ export interface IdentityDatabaseConfig {
 interface LocalPostgresUrl {
   readonly original: string;
   readonly host: string;
+  readonly port: number;
   readonly database: string;
   readonly username: string;
 }
@@ -67,7 +68,7 @@ function parseLocalUrl(value: string | undefined, name: string): LocalPostgresUr
     throw new TypeError(`${name} must name a database`);
   }
 
-  return { original: value, host, database, username };
+  return { original: value, host, port: Number(url.port || 5432), database, username };
 }
 
 function parseBoundedInteger(
@@ -105,6 +106,7 @@ export function parseDatabaseConfig(
   const importUrl = parseLocalUrl(env["DB_IMPORT_URL"] ?? env["DB_RUNTIME_URL"], "DB_IMPORT_URL");
   if (
     migration.host !== runtime.host ||
+    migration.port !== runtime.port ||
     migration.database !== runtime.database ||
     migration.username === runtime.username
   ) {
@@ -114,6 +116,7 @@ export function parseDatabaseConfig(
   if (env["DB_IMPORT_URL"]) {
     if (
       migration.host !== importUrl.host ||
+      migration.port !== importUrl.port ||
       migration.database !== importUrl.database ||
       runtime.username === importUrl.username ||
       migration.username === importUrl.username
@@ -168,8 +171,10 @@ export function parseIdentityDatabaseConfig(
 
   if (
     reader.host !== migration.host ||
+    reader.port !== migration.port ||
     reader.database !== migration.database ||
     writer.host !== migration.host ||
+    writer.port !== migration.port ||
     writer.database !== migration.database
   ) {
     throw new TypeError("Identity roles must target the same local database as the catalog roles");

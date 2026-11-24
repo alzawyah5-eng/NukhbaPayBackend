@@ -25,7 +25,23 @@ export function consumeStaffSessionTicket(value: unknown): value is StaffSession
   tickets.delete(value); return true;
 }
 export type SessionStoreOutcome = "COMMITTED" | "ACTIVE" | "REVOKED" | "ABSENT" | "DENIED" | "UNRESOLVED";
-export interface StaffSessionStore { execute(ticket: StaffSessionTicket): Promise<SessionStoreOutcome> }
+export interface StaffSessionHistoryEntry {
+  readonly id:string;
+  readonly createdAtMs:number;
+  readonly lastUsedAtMs:number;
+  readonly expiresAtMs:number;
+  readonly revoked:boolean;
+}
+export interface StaffSessionHistoryTicket {
+  readonly staffId:string;
+  readonly tenantId:string;
+}
+const historyTickets=new WeakSet<StaffSessionHistoryTicket>();
+export function consumeStaffSessionHistoryTicket(ticket:StaffSessionHistoryTicket):boolean {return historyTickets.delete(ticket);}
+export interface StaffSessionStore {
+  execute(ticket: StaffSessionTicket): Promise<SessionStoreOutcome>;
+  history?(ticket:StaffSessionHistoryTicket):Promise<readonly StaffSessionHistoryEntry[]>;
+}
 class SessionCredential {
   readonly #value: string;
   constructor(value: string) { this.#value = value; Object.freeze(this); }
@@ -71,22 +87,40 @@ export class StaffSessionLifecycle {
   async #execute(ticket:StaffSessionTicket) {try{return await this.dependencies.store.execute(ticket);}catch{return "UNRESOLVED" as const;}finally{tickets.delete(ticket);}}
   async create(actor:TrustedStaffActor) {return this.#issue(actor);}
   async rotate(actor:TrustedStaffActor,previousToken:string) {return this.#issue(actor,previousToken);}
-  async #issue(actor:TrustedStaffActor,previousToken?:string) {
+  /** A fresh ordinary login may replace an expired session for the same canonical identity. */
+  async reauthenticate(actor:TrustedStaffActor,previousToken:string) {return this.#issue(actor,previousToken,true);}
+  /** Release expired local bindings only. Durable session/audit history remains append-only. */
+  cleanup():number {
+    const now=this.#now();let removed=0;
+    for(const [key,entry] of this.#known)if(entry.expiresAtMs<=now){entry.invalidated=true;this.#known.delete(key);removed++;}
+    return removed;
+  }
+  async #issue(actor:TrustedStaffActor,previousToken?:string,reauthenticate=false) {
     if(this.dependencies.enabled!==true)return failure("DISABLED");
     try {
       if(typeof actor==='object' && actor!==null && this.#blockedActors.has(actor))return failure("DENIED");
       const evidence=await this.dependencies.actors.inspectSessionActor(actor);
       if(!isVerifiedSessionActor(evidence,actor))return failure("DENIED");
-      if(this.#known.size>=1000)return failure("UNAVAILABLE");
-      const bound=binding(evidence),prior=previousToken===undefined?undefined:validToken(previousToken)?this.#known.get(hash(previousToken)):undefined;
-      if(previousToken!==undefined && (!prior || prior.binding.staffId!==bound.staffId || prior.binding.tenantId!==bound.tenantId ||
+      const bound=binding(evidence),previousHash=validToken(previousToken)?hash(previousToken):undefined;
+      const prior=previousHash && this.#known.get(previousHash);
+      if(previousToken!==undefined && (!prior || prior.invalidated || prior.binding.staffId!==bound.staffId || prior.binding.tenantId!==bound.tenantId ||
         prior.binding.issuer!==bound.issuer || prior.binding.subject!==bound.subject))return failure("DENIED");
+      const expiredReauthentication=reauthenticate && !!prior && prior.expiresAtMs<=this.#now();
+      if(reauthenticate && previousToken && !expiredReauthentication) {
+        const active=await this.validate(previousToken);
+        if(!active.ok)return active;
+      }
+      this.cleanup();
+      if(prior && !expiredReauthentication && prior.invalidated)return failure("DENIED");
+      if(this.#known.size>=1000)return failure("UNAVAILABLE");
       const now=this.#now(),expiresAtMs=Math.min(now+(this.dependencies.absoluteMs??STAFF_SESSION_ABSOLUTE_MS),bound.identityExpiresAtMs);
       if(expiresAtMs<=now)return failure("DENIED");
       const token=randomBytes(32).toString("base64url"),tokenHash=hash(token),id=randomUUID();
-      const outcome=await this.#execute(this.#ticket(prior?"ROTATE":"CREATE",tokenHash,id,bound,expiresAtMs,evidence.revalidate,
-        previousToken===undefined?undefined:hash(previousToken),prior?.binding));
+      const rotating=prior && !expiredReauthentication;
+      const outcome=await this.#execute(this.#ticket(rotating?"ROTATE":"CREATE",tokenHash,id,bound,expiresAtMs,evidence.revalidate,
+        rotating?previousHash:undefined,rotating?prior.binding:undefined));
       if(outcome!=="COMMITTED")return failure(outcome==="UNRESOLVED"?"UNAVAILABLE":"DENIED");
+      if(prior)prior.invalidated=true;
       this.#known.set(tokenHash,{actor,binding:bound,id,expiresAtMs,invalidated:false});
       if(!await evidence.revalidate())return this.#invalidate(token); // Never issue a credential after a changed authority snapshot.
       return Object.freeze({ok:true as const,credential:new SessionCredential(token),execution:"NOT_AUTHORIZED" as const});
@@ -102,7 +136,7 @@ export class StaffSessionLifecycle {
       if(!isVerifiedSessionActor(evidence,known.actor) || !same(binding(evidence),known.binding)) {
         return this.#invalidate(token);
       }
-      const fresh=async()=>!known.invalidated && await evidence.revalidate();
+      const fresh=async()=>{const valid=await evidence.revalidate();return valid && !known.invalidated;};
       const result=await this.#execute(this.#ticket("VALIDATE",hash(token),known.id,known.binding,known.expiresAtMs,fresh));
       if(result!=="ACTIVE")return result==="UNRESOLVED"?failure("UNAVAILABLE"):this.#invalidate(token,!await fresh());
       if(!await fresh())return this.#invalidate(token);
@@ -118,9 +152,29 @@ export class StaffSessionLifecycle {
       if(!known || known.invalidated || known.expiresAtMs<=this.#now())return failure('DENIED');
       const evidence=await this.dependencies.actors.inspectSessionActor(known.actor);
       if(!isVerifiedSessionActor(evidence,known.actor) || !same(binding(evidence),known.binding) || !await evidence.revalidate())return this.#invalidate(token);
+      if(known.invalidated || known.expiresAtMs<=this.#now())return failure('DENIED');
       return Object.freeze({ok:true as const,profile:Object.freeze({staffId:evidence.staffId,tenantId:evidence.tenantId,
         expiresAtMs:known.expiresAtMs}),execution:'NOT_AUTHORIZED' as const});
     } catch {return failure('UNAVAILABLE');}
+  }
+  async readHistory(token:string) {
+    if (!validToken(token) || !this.dependencies.store.history) return failure('UNAVAILABLE');
+    const active=await this.validate(token);
+    if(!active.ok)return active;
+    const known=this.#known.get(hash(token));
+    if(!known?.binding.tenantId || known.invalidated)return failure('DENIED');
+    const ticket=Object.freeze({staffId:known.binding.staffId,tenantId:known.binding.tenantId});
+    historyTickets.add(ticket);
+    try {
+      const rows=await this.dependencies.store.history(ticket);
+      const final=await this.validate(token);
+      if(!final.ok)return final;
+      return {ok:true as const,items:rows.map(row=>({
+        id:row.id,createdAtMs:row.createdAtMs,lastUsedAtMs:row.lastUsedAtMs,expiresAtMs:row.expiresAtMs,
+        state:row.id===known.id?'CURRENT':row.revoked?'REVOKED':row.expiresAtMs<=this.#now()?'EXPIRED':'RECORDED',
+      }))};
+    } catch {return failure('UNAVAILABLE');}
+    finally {historyTickets.delete(ticket);}
   }
   async revoke(token:string) {return this.#revocation(token,"REVOKE");}
   async verifyRevocation(token:string) {return this.#revocation(token,"CHECK_REVOKED");}
@@ -133,6 +187,9 @@ export class StaffSessionLifecycle {
     if(this.dependencies.enabled!==true)return failure("DISABLED");
     if(!validToken(token))return failure("DENIED");
     const known=this.#known.get(hash(token));if(!known)return failure("DENIED");
+    // Local denial precedes persistence: an uncertain logout must never regain authority after recovery.
+    // Keep the binding so durable revocation can be retried and independently verified.
+    if(operation==="REVOKE")known.invalidated=true;
     const outcome=await this.#execute(this.#ticket(operation,hash(token),known.id,known.binding,known.expiresAtMs,async()=>true,undefined,undefined,reason));
     return outcome==="REVOKED" ? Object.freeze({ok:true as const,revoked:true as const,execution:"NOT_AUTHORIZED" as const})
       : failure(outcome==="UNRESOLVED"?"UNAVAILABLE":"DENIED");

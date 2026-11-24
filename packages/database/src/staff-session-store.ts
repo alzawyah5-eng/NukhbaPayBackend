@@ -1,33 +1,60 @@
 import { randomUUID } from "node:crypto";
 import { Pool, type PoolClient } from "pg";
-import { consumeStaffSessionTicket, type StaffSessionStore, type StaffSessionTicket, type SessionStoreOutcome, type SessionBinding } from "@nukhbapay/application";
+import { verifyWindowsStaffConnection, windowsSessionRole, windowsStaffDatabase, windowsStaffTarget, type WindowsStaffTarget } from './windows-staff-target.js';
+import { consumeStaffSessionHistoryTicket, consumeStaffSessionTicket, type StaffSessionStore, type StaffSessionHistoryTicket,
+  type StaffSessionTicket, type SessionStoreOutcome, type SessionBinding } from "@nukhbapay/application";
 
 class Denied extends Error {}
 const unavailable = () => new Error("Restricted session persistence unavailable");
-export async function createStaffSessionStore(input: {
+interface StaffSessionStoreInput {
   readonly connectionString:string; readonly expectedRole:string; readonly expectedDatabase:string; readonly poolMax?:number;
-}):Promise<StaffSessionStore & {close():Promise<void>}> {
+}
+
+export function createStaffSessionStore(input:StaffSessionStoreInput) {
+  return openStaffSessionStore(input,'GUARDED');
+}
+
+/** Reuses the real persistence contract on the independently scoped disposable
+ * staff-effect schema. The production-compatible constructor remains guarded. */
+export function createDisposableStaffSessionStore(input:StaffSessionStoreInput) {
+  return openStaffSessionStore(input,'DISPOSABLE_EFFECT');
+}
+
+export function createWindowsStaffSessionStore(input:StaffSessionStoreInput, target:WindowsStaffTarget) {
+  return openStaffSessionStore(input,windowsStaffTarget(target.databaseOid,target.systemIdentifier));
+}
+
+async function openStaffSessionStore(input:StaffSessionStoreInput,mode:'GUARDED'|'DISPOSABLE_EFFECT'|WindowsStaffTarget):
+  Promise<StaffSessionStore & {close():Promise<void>;checkWindowsReadiness?:(issuer:string)=>Promise<boolean>}> {
   let pool:Pool|undefined;
   const brokenClients=new WeakSet<PoolClient>();
   try {
     const url=new URL(input.connectionString),max=input.poolMax??2;
-    if(!/^nukh_session_[0-9a-f]{20}$/.test(input.expectedRole) || !/^nukhabapay_b3b[23]_[0-9a-f]{32}$/.test(input.expectedDatabase) ||
-      !["postgres:","postgresql:"].includes(url.protocol) || url.hostname!=="127.0.0.1" || (url.port||"5432")!=="5432" ||
+    const port=Number(url.port||5432);
+    const expected=typeof mode==='object' ? input.expectedRole===windowsSessionRole && input.expectedDatabase===windowsStaffDatabase && port===5432 :
+      mode==='GUARDED' ? /^nukh_session_[0-9a-f]{20}$/.test(input.expectedRole) &&
+      /^nukhabapay_b3b[23]_[0-9a-f]{32}$/.test(input.expectedDatabase) && port===5432 :
+      input.expectedRole==='nukh_effect_session' && /^nukhabapay_effect_[0-9a-f]{32}$/.test(input.expectedDatabase) &&
+      Number.isInteger(port) && port>1024 && ![5432,55437].includes(port);
+    if(!expected || !["postgres:","postgresql:"].includes(url.protocol) || url.hostname!=="127.0.0.1" ||
       url.search || url.hash || !url.password || decodeURIComponent(url.username)!==input.expectedRole ||
       decodeURIComponent(url.pathname.slice(1))!==input.expectedDatabase || !Number.isInteger(max) || max<1 || max>3)throw unavailable();
     pool=new Pool({connectionString:input.connectionString,max,connectionTimeoutMillis:3000,idleTimeoutMillis:1000,
+      ...(typeof mode==='object' && {onConnect:(client)=>verifyWindowsStaffConnection(client,mode,windowsSessionRole)}),
       statement_timeout:5000,query_timeout:6000,application_name:"nukhbapay-staff-session-store"});
     pool.on("error",()=>undefined);
     // A discarded socket can report another error after query rejection/release.
     // Track it on that client; never install a process-wide exception handler.
     pool.on("connect",client=>{client.on("error",()=>{brokenClients.add(client);});});
     const target=(await pool.query(`SELECT current_database() AS database,current_user AS role,host(inet_server_addr()) AS host,inet_server_port() AS port,
+      current_setting('nukhbapay.effective_staff_fixture',true) AS fixture,
       (SELECT rolsuper OR rolcreatedb OR rolcreaterole OR rolinherit OR rolbypassrls OR NOT rolcanlogin FROM pg_roles WHERE rolname=current_user) AS unsafe,
       EXISTS(SELECT 1 FROM pg_auth_members WHERE member=(SELECT oid FROM pg_roles WHERE rolname=current_user) OR roleid=(SELECT oid FROM pg_roles WHERE rolname=current_user)) AS memberships,
       has_schema_privilege(current_user,'nukhabapay','USAGE,CREATE') OR has_schema_privilege(current_user,'nukhbapay_sessions','CREATE') OR
       has_database_privilege(current_user,current_database(),'CREATE,TEMP') AS excess,
       NOT has_schema_privilege(current_user,'nukhbapay_sessions','USAGE') AS missing_scope`)).rows[0];
-    if(target.database!==input.expectedDatabase || target.role!==input.expectedRole || target.host!=="127.0.0.1" || target.port!==5432 ||
+    if(target.database!==input.expectedDatabase || target.role!==input.expectedRole || target.host!=="127.0.0.1" || target.port!==port ||
+      mode==='DISPOSABLE_EFFECT' && target.fixture!=='isolated' ||
       target.unsafe || target.memberships || target.excess || target.missing_scope)throw unavailable();
     const tables=(await pool.query(`SELECT relname,relrowsecurity,relforcerowsecurity,
       has_table_privilege(current_user,c.oid,'SELECT') AS can_read,has_table_privilege(current_user,c.oid,'INSERT') AS can_append,
@@ -99,7 +126,8 @@ export async function createStaffSessionStore(input: {
           }
         }
         if(ticket.operation!=="REVOKE" && ticket.operation!=="CHECK_REVOKED" && !await ticket.revalidate())throw new Denied();
-        await c.query("COMMIT");transaction=false;return brokenClients.has(c)?"UNRESOLVED":result;
+        if ((await c.query("COMMIT")).command!=="COMMIT") throw unavailable();
+        transaction=false;return brokenClients.has(c)?"UNRESOLVED":result;
       } catch(error) {
         const code=typeof error==='object'&&error!==null&&'code' in error?String(error.code):'';
         discard=!(error instanceof Denied) && (!/^[0-9A-Z]{5}$/.test(code)||code.startsWith('08')||code==='57P01');
@@ -109,6 +137,47 @@ export async function createStaffSessionStore(input: {
         if(c)c.release(discard||brokenClients.has(c));
       }
     }
-    return Object.freeze({execute,close:async()=>{if(!closed){closed=true;await activePool.end();}}});
+    async function history(ticket:StaffSessionHistoryTicket) {
+      if(closed || mode==='DISPOSABLE_EFFECT' || !consumeStaffSessionHistoryTicket(ticket)) throw unavailable();
+      const client=await activePool.connect();
+      let discard=false;
+      try {
+        await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+        await client.query("SELECT set_config('nukhbapay_sessions.staff_id',$1,true),set_config('nukhbapay_sessions.scope',$2,true)",
+          [ticket.staffId,ticket.tenantId]);
+        const {rows}=await client.query<{id:string;created_ms:string;expires_ms:string;last_ms:string;revoked:boolean}>(`
+          SELECT s.id,s.created_ms,s.expires_ms,
+            COALESCE(max(e.occurred_ms) FILTER (WHERE e.event_name='SESSION_USED'),s.created_ms) AS last_ms,
+            COALESCE(bool_or(e.event_name='SESSION_REVOKED'),false) AS revoked
+          FROM nukhbapay_sessions.sessions s LEFT JOIN nukhbapay_sessions.events e
+            ON e.session_id=s.id AND e.actor_staff_id=s.actor_staff_id AND e.scope_key=s.scope_key
+          WHERE s.actor_staff_id=$1 AND s.tenant_id=$2
+          GROUP BY s.id ORDER BY s.created_ms DESC,s.id DESC LIMIT 50`,[ticket.staffId,ticket.tenantId]);
+        if ((await client.query('COMMIT')).command!=='COMMIT') throw unavailable();
+        return rows.map(row=>({id:row.id,createdAtMs:Number(row.created_ms),lastUsedAtMs:Number(row.last_ms),
+          expiresAtMs:Number(row.expires_ms),revoked:row.revoked}));
+      } catch {
+        try {await client.query('ROLLBACK');} catch {discard=true;}
+        throw unavailable();
+      } finally {client.release(discard||brokenClients.has(client));}
+    }
+    async function checkWindowsReadiness(issuer:string) {
+      if(closed || typeof mode!=='object')return false;
+      try {
+        await verifyWindowsStaffConnection(activePool,mode,windowsSessionRole);
+        const result=await activePool.query(`SELECT count(*)=2 AND bool_and(relrowsecurity AND relforcerowsecurity
+            AND pg_get_userbyid(relowner)='nukhabapay_migrator' AND NOT has_table_privilege(current_user,oid,'MAINTAIN'))
+          AND EXISTS(SELECT FROM pg_catalog.pg_constraint k WHERE k.conrelid='nukhbapay_sessions.sessions'::regclass
+            AND k.contype='c' AND k.convalidated AND k.conenforced
+            AND pg_catalog.pg_get_expr(k.conbin,k.conrelid)=pg_catalog.format('(issuer = %L::text)',$1::text))
+          AND NOT EXISTS(SELECT FROM pg_catalog.pg_constraint k WHERE k.conrelid IN
+            ('nukhbapay_sessions.sessions'::regclass,'nukhbapay_sessions.events'::regclass) AND (NOT k.convalidated OR NOT k.conenforced))
+          AS protected FROM pg_catalog.pg_class WHERE oid IN
+          ('nukhbapay_sessions.sessions'::regclass,'nukhbapay_sessions.events'::regclass)`,[issuer]);
+        return result.rows[0]?.protected===true;
+      } catch {return false;}
+    }
+    return Object.freeze({execute,history,...(typeof mode==='object' && {checkWindowsReadiness}),
+      close:async()=>{if(!closed){closed=true;await activePool.end();}}});
   } catch {await pool?.end().catch(()=>undefined);throw unavailable();}
 }

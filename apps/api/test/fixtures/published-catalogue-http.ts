@@ -48,6 +48,11 @@ export async function exercisePublishedCatalogueHttp(f:{reader:CatalogueReader;a
   assert.equal(one.status,200);assert.equal(one.body.items.length,1);assert.equal(one.body.items[0].product_id,f.productId);
   assert.deepEqual(Object.keys(one.body.items[0]).sort(),["product_id","name","category","price_status","catalog_version","display_total","currency"].sort());
   assert.equal(one.body.items[0].catalog_version,f.oldVersion);assert.equal(one.body.items[0].display_total,"102.00");
+  const searched=await send('/v1/payment/catalogue?search=synthetic&country=AE&region=AE&service=DIGITAL_PIN');
+  assert.equal(searched.status,200);assert.equal(searched.body.items.length,1);
+  assert.deepEqual((await send('/v1/payment/catalogue?country=SA')).body.items,[]);
+  assert.deepEqual((await send(`/v1/kiosks/${kioskId}/catalogue?service=AIRTIME`,kiosk)).body.items,[]);
+  for(const query of ['search=a&search=b','country=AE&country=SA','country=AE%0A','search=%20','service=digital_pin'])assert.equal((await send('/v1/payment/catalogue?'+query)).status,400);
   assert.equal((await send(`/v1/payment/catalogue/${f.productId}`,other)).status,404);
   assert.deepEqual((await send("/v1/payment/catalogue",other)).body.items,[]);
   assert.equal((await send(`/v1/payment/catalogue/${f.unpublishedId}`)).status,404);
@@ -55,6 +60,9 @@ export async function exercisePublishedCatalogueHttp(f:{reader:CatalogueReader;a
   for(const query of ["limit=0","limit=51","limit=1.5","limit=01","limit=1&limit=2","cursor=forged","tenantId="+f.otherTenantId,"__proto__=forged"])assert.equal((await send("/v1/payment/catalogue?"+query)).status,400);
   const extra=await fetch(base+"/v1/payment/catalogue",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({payload:"x".repeat(17000)})});assert.equal(extra.status,413);
   await f.activateSecond();
+  const filtered=await send('/v1/payment/catalogue?search=synthetic&limit=1');assert.ok(filtered.body.next_cursor);
+  assert.equal((await send('/v1/payment/catalogue?limit=1&cursor='+filtered.body.next_cursor)).status,409);
+  assert.equal((await send('/v1/payment/catalogue?search=SYNTHETIC&limit=1&cursor='+filtered.body.next_cursor)).status,200);
   const first=await send("/v1/payment/catalogue?limit=1");assert.equal(first.body.items.length,1);assert.ok(first.body.next_cursor);
   const page2=await send("/v1/payment/catalogue?limit=1&cursor="+first.body.next_cursor);assert.equal(page2.status,200);assert.equal(page2.body.catalogue_version,first.body.catalogue_version);assert.equal(page2.body.next_cursor,null);
   assert.ok(first.body.items[0].product_id<page2.body.items[0].product_id);

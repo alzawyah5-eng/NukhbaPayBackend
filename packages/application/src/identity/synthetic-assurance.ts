@@ -6,6 +6,7 @@ export interface SyntheticApprovalBinding {
   readonly staffId: string; readonly identityIssuer: string; readonly identitySubject: string;
   readonly requestId: string; readonly requestVersion: string; readonly requestDigest: string;
   readonly policyVersion: string; readonly tenantId: string | null; readonly authorityDigest: string;
+  readonly decision?: "APPROVE" | "REJECT";
 }
 declare const challengeBrand: unique symbol;
 export interface SyntheticAssuranceChallenge {

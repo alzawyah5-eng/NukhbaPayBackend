@@ -1,3 +1,4 @@
+param([switch]$Auth0TestLogin)
 $ErrorActionPreference = 'Stop'
 
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
@@ -42,6 +43,7 @@ function Find-ValidCertificateMetadata {
       Write-Warning "Ignoring incomplete local HTTPS certificate metadata in '$($directory.Name)'."
       continue
     }
+    if ($Auth0TestLogin -and -not (Test-Path -LiteralPath ('Cert:\CurrentUser\Root\' + $thumbprint))) { continue }
 
     & powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File $setupScript -Action Inspect -Thumbprint $thumbprint *> $null
     if ($LASTEXITCODE -eq 0) { return $metadataPath }
@@ -53,13 +55,22 @@ function Find-ValidCertificateMetadata {
 Push-Location $repositoryRoot
 try {
   $env:NODE_ENV = 'development'
-  $env:NUKHBAPAY_STAFF_UI_PREVIEW = 'enabled'
+  if ($Auth0TestLogin) {
+    $env:NUKHBAPAY_ENV = 'local'
+    $env:NUKHBAPAY_ENVIRONMENT = 'development'
+    $env:NUKHBAPAY_STAFF_SESSION_MODE = 'auth0-test-login'
+  } else { $env:NUKHBAPAY_STAFF_UI_PREVIEW = 'enabled' }
 
   & corepack.cmd pnpm staff:build
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  if ($Auth0TestLogin) {
+    & corepack.cmd pnpm --filter @nukhbapay/database build
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  }
 
   $metadataPath = Find-ValidCertificateMetadata
   if (-not $metadataPath) {
+    if ($Auth0TestLogin) { throw 'A reviewed, browser-trusted NukhbaPay localhost certificate is required' }
     Write-Output 'Creating a localhost-only HTTPS certificate; Windows trust will not be changed.'
     & powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File $setupScript -Action Create *> $null
     if ($LASTEXITCODE -ne 0) { throw 'Local HTTPS certificate creation failed' }
@@ -67,8 +78,11 @@ try {
   }
   if (-not $metadataPath) { throw 'No valid local HTTPS certificate is available' }
 
-  & powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File $launcherScript `
-    -CertificateMetadata $metadataPath -PinnedCertificateOnly
+  if ($Auth0TestLogin) {
+    & powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File $launcherScript -CertificateMetadata $metadataPath -Auth0TestLogin
+  } else {
+    & powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File $launcherScript -CertificateMetadata $metadataPath -PinnedCertificateOnly
+  }
   exit $LASTEXITCODE
 } finally {
   Pop-Location

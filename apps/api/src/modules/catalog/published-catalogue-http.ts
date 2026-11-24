@@ -70,7 +70,7 @@ export class PublishedCatalogueHttpBoundary {
   const path=request.originalUrl.split("?",1)[0]!;
   if(!new RegExp(kind==="payment"?`^/v1/payment/catalogue(?:/${uuid})?$`:`^/v1/kiosks/${uuid}/catalogue(?:/${uuid})?$`).test(path))throw new HttpException("Unavailable",400);
   const params=new URL(request.originalUrl,"http://catalogue.invalid").searchParams,q:Record<string,string>={};
-  for(const [key,value] of params){if(!["limit","cursor"].includes(key)||Object.hasOwn(q,key))throw new HttpException("Unavailable",400);q[key]=value;}
+  for(const [key,value] of params){if(!["limit","cursor","search","country","region","service"].includes(key)||Object.hasOwn(q,key))throw new HttpException("Unavailable",400);q[key]=value;}
   try{
    const result=await this.deps.service.read(identity,{kind,...(kind==="kiosk"?{kioskId:request.params["kioskId"] as string}:{}),...(request.params["productId"]===undefined?{}:{productId:request.params["productId"] as string}),query:q});
    replies.set(request,result);return true;

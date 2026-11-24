@@ -1,11 +1,17 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, X509Certificate } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // Synthetic-only acceptance: no configuration, account, database or trust-store provisioning.
+const args=process.argv.slice(2);
+if(args.length>1||(args.length===1&&!['--tls-only','--diagnose-tls','--built','--effective-db','--publication-db'].includes(args[0]))) {
+  throw new Error('Expected no arguments, --tls-only, --diagnose-tls, --built, --effective-db or --publication-db');
+}
+const mode=args[0];
+const startedAt=performance.now();
 const root=fileURLToPath(new URL('../../',import.meta.url));
 const parent=path.resolve(tmpdir());
 const directory=mkdtempSync(path.join(parent,'nukhbapay-staff-synthetic-'));
@@ -28,18 +34,69 @@ try {
   run(['req','-x509','-newkey','rsa:2048','-nodes','-keyout','key.pem','-out','certificate.pem','-days','1',
     '-subj','/CN=localhost','-addext','subjectAltName=DNS:localhost','-addext','basicConstraints=critical,CA:FALSE',
     '-addext','extendedKeyUsage=serverAuth','-addext','keyUsage=critical,digitalSignature,keyEncipherment']);
-  run(['pkcs12','-export','-out','certificate.pfx','-inkey','key.pem','-in','certificate.pem',
-    '-passout','env:NUKHBAPAY_STAFF_SYNTHETIC_PFX_PASSWORD']);
-  env.NUKHBAPAY_STAFF_TEST_PFX_PATH=path.join(directory,'certificate.pfx');
-  env.NUKHBAPAY_STAFF_TEST_CA_PATH=path.join(directory,'certificate.pem');
-  env.NUKHBAPAY_STAFF_TEST_PASSPHRASE=password;
-  delete env.NUKHBAPAY_STAFF_SYNTHETIC_PFX_PASSWORD;
-  const result=process.platform==='win32'
-    ?spawnSync(process.env.ComSpec??'cmd.exe',['/d','/s','/c','pnpm.cmd staff:test'],{cwd:root,env,encoding:'utf8',windowsHide:true,maxBuffer:12*1024*1024})
-    :spawnSync('pnpm',['staff:test'],{cwd:root,env,encoding:'utf8',maxBuffer:12*1024*1024});
-  const output=((result.stdout??'')+(result.stderr??'')).replaceAll(password,'[redacted]');
-  process.stdout.write(output);
-  if(result.status!==0||result.error)throw new Error('Synthetic staff acceptance failed');
+  if(mode==='--diagnose-tls') {
+    const certificate=new X509Certificate(readFileSync(path.join(directory,'certificate.pem')));
+    const now=Date.now();
+    console.info(JSON.stringify({
+      node:process.version, nodeOpenSsl:process.versions.openssl,
+      subject:certificate.subject, issuer:certificate.issuer, san:certificate.subjectAltName,
+      nonCA:!certificate.ca, currentlyValid:now>=Date.parse(certificate.validFrom)&&now<Date.parse(certificate.validTo),
+      exactHostname:certificate.checkHost('localhost',{subject:'never',wildcards:false})==='localhost',
+      serverAuth:certificate.keyUsage?.includes('1.3.6.1.5.5.7.3.1'),
+      rsaBits:certificate.publicKey.asymmetricKeyDetails?.modulusLength,
+      checkIssuedSelf:certificate.checkIssued(certificate), selfSignature:certificate.verify(certificate.publicKey),
+    }));
+    console.info(run(['x509','-in','certificate.pem','-noout','-ext','keyUsage']).toString().trim());
+  } else {
+    run(['pkcs12','-export','-out','certificate.pfx','-inkey','key.pem','-in','certificate.pem',
+      '-passout','env:NUKHBAPAY_STAFF_SYNTHETIC_PFX_PASSWORD']);
+    // Public negative fixtures, same private key: fingerprint equality must still hold.
+    for(const [name,san,basic,eku,subject='localhost'] of [
+      ['mismatch','DNS:localhost','CA:FALSE','serverAuth'],
+      ['wrong-host','DNS:wrong.synthetic.invalid','CA:FALSE','serverAuth'],
+      ['ca','DNS:localhost','CA:TRUE','serverAuth'],
+      ['client-only','DNS:localhost','CA:FALSE','clientAuth'],
+      ['wrong-subject','DNS:localhost','CA:FALSE','serverAuth','wrong.synthetic.invalid'],
+      ['extra-san','DNS:localhost,DNS:other.synthetic.invalid','CA:FALSE','serverAuth'],
+      ['wildcard','DNS:*.localhost','CA:FALSE','serverAuth'],
+    ])run(['req','-x509','-key','key.pem','-out',`${name}.pem`,'-days','1','-subj',`/CN=${subject}`,
+      '-addext',`subjectAltName=${san}`,'-addext',`basicConstraints=critical,${basic}`,'-addext',`extendedKeyUsage=${eku}`]);
+    // Same key, different issuer name: a valid signature alone must not satisfy the self-issued policy.
+    run(['req','-x509','-key','key.pem','-out','issuer.pem','-days','1','-subj','/CN=issuer.synthetic.invalid',
+      '-addext','basicConstraints=critical,CA:TRUE','-addext','keyUsage=critical,keyCertSign']);
+    run(['req','-new','-key','key.pem','-out','localhost.csr','-subj','/CN=localhost']);
+    writeFileSync(path.join(directory,'leaf-extensions.cnf'),
+      'subjectAltName=DNS:localhost\nbasicConstraints=critical,CA:FALSE\nextendedKeyUsage=serverAuth\nkeyUsage=critical,digitalSignature,keyEncipherment\n');
+    run(['x509','-req','-in','localhost.csr','-CA','issuer.pem','-CAkey','key.pem','-set_serial','2',
+      '-days','1','-extfile','leaf-extensions.cnf','-out','wrong-issuer.pem']);
+    env.NUKHBAPAY_STAFF_TEST_PFX_PATH=path.join(directory,'certificate.pfx');
+    env.NUKHBAPAY_STAFF_TEST_CA_PATH=path.join(directory,'certificate.pem');
+    env.NUKHBAPAY_STAFF_TEST_TLS_CASES_DIR=directory;
+    env.NUKHBAPAY_STAFF_TEST_PASSPHRASE=password;
+    delete env.NUKHBAPAY_STAFF_SYNTHETIC_PFX_PASSWORD;
+    const command=mode==='--effective-db' ? 'node --test --test-reporter=tap scripts/test/staff-effective-membership.mjs' : mode==='--built' ? 'node --test apps/admin-web/dist-test/test/*.spec.js' : mode==='--tls-only'
+      ? 'pnpm.cmd --filter @nukhbapay/admin-web exec tsc -p tsconfig.test.json && node --test apps/admin-web/dist-test/test/development-tls.spec.js apps/admin-web/dist-test/test/portal.spec.js'
+      : 'pnpm.cmd staff:test';
+    const options={cwd:root,env,encoding:'utf8',windowsHide:true,maxBuffer:12*1024*1024};
+    let result;
+    if(mode==='--publication-db') {
+      const soakMs=Number(env.NUKHBA_DISPOSABLE_SOAK_MS);
+      const soakBudget=Number.isSafeInteger(soakMs)&&soakMs>=1000&&soakMs<=600000?soakMs:0;
+      // Leave time for the inner runner to record output and tear down its certificate.
+      const elapsedMs=performance.now()-startedAt;
+      const timeout=Math.max(1,Math.floor(110000+soakBudget-elapsedMs));
+      console.info('Starting disposable publication suite with temporary HTTPS credentials.');
+      result=spawnSync(process.execPath,['--test','--test-reporter=tap','scripts/test/catalogue-publication-outbox.mjs'],{...options,timeout});
+      if(result.error)console.error('Disposable publication process status: '+result.error.code);
+    } else if(process.platform==='win32') {
+      result=spawnSync(process.env.ComSpec??'cmd.exe',['/d','/s','/c',command],options);
+    } else {
+      result=spawnSync('/bin/sh',['-c',command.replaceAll('pnpm.cmd','pnpm')],options);
+    }
+    const output=((result.stdout??'')+(result.stderr??'')).replaceAll(password,'[redacted]');
+    process.stdout.write(output);
+    if(result.status!==0||result.error)throw new Error('Synthetic staff acceptance failed');
+  }
 } catch {
   console.error('Synthetic staff acceptance failed; no private diagnostics emitted.');
   process.exitCode=1;
