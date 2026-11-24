@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([switch]$Configure, [switch]$Check)
+param([switch]$Configure, [switch]$Check, [switch]$Catalogue)
 
 $ErrorActionPreference = 'Stop'
 $project = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
@@ -68,6 +68,7 @@ $credentials = [ordered]@{}
 $passwords = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 $temporaryProfile = $null
 $password = $null
+$catalogueProfile = $null
 try {
   if (Test-Path -LiteralPath $vault) { Confirm-PrivateProfilePath $vault $owner }
   $profileExists = Test-Path -LiteralPath $profilePath
@@ -107,6 +108,21 @@ try {
   $settings['NUKHBAPAY_STAFF_ENROLLMENT_SUBJECT'] = Unlock-StaffSetting $credentials['NUKHBAPAY_STAFF_ENROLLMENT_SUBJECT']
   $settings['NUKHBAPAY_STAFF_AUTH0_CLIENT_SECRET'] = Unlock-StaffSetting $credentials['NUKHBAPAY_STAFF_AUTH0_CLIENT_SECRET']
 
+  if ($Catalogue) {
+    $catalogueSetup = Join-Path $PSScriptRoot 'setup-windows-catalogue.ps1'
+    & $catalogueSetup -ForStartup -Check:$Check
+    $cataloguePath = Join-Path $vault 'windows-catalogue.clixml'
+    Confirm-PrivateProfilePath $cataloguePath $owner
+    $catalogueProfile = Import-Clixml -LiteralPath $cataloguePath
+    $catalogueCredential = $catalogueProfile.Credentials['nukhbapay_catalogue_reader']
+    if ($catalogueProfile.Version -ne 1 -or $catalogueProfile.Cluster -cne $inspection.systemIdentifier -or
+        $catalogueProfile.Id -notmatch '^[a-f0-9]{32}$' -or $catalogueCredential -isnot [Security.SecureString]) {
+      throw 'Catalogue reader settings do not match the verified Windows cluster.'
+    }
+    $settings['NUKHBAPAY_LOCAL_CATALOGUE_SETUP_ID'] = $catalogueProfile.Id
+    $settings['DB_LOCAL_CATALOGUE_READER_PASSWORD'] = Unlock-StaffSetting $catalogueCredential
+  }
+
   if ($needsSetup -or $Check) { & $launcher -PreflightOnly -Settings $settings }
   if ($needsSetup) {
     if (!(Test-Path -LiteralPath $vault)) {
@@ -135,6 +151,11 @@ try {
   $password = $null
   $passwords.Clear()
   $settings.Clear()
+  if ($catalogueProfile) {
+    foreach ($credential in $catalogueProfile.Credentials.Values) {
+      if ($credential -is [Security.SecureString]) { $credential.Dispose() }
+    }
+  }
   foreach ($credential in $credentials.Values) {
     if ($credential -is [Security.SecureString]) { $credential.Dispose() }
   }

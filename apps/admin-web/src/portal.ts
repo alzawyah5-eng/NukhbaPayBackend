@@ -54,7 +54,7 @@ function htmlLogoutPolicy(body:Buffer,destination:string):Buffer {
 export async function createStaffPortal(options:{
   readonly pfx:Buffer;readonly certificate:Buffer;readonly passphrase:string;readonly port?:number;readonly sessions?:InternalSessionPort;
   readonly login?:Auth0Login;
-  readonly staffCatalogue?: Pick<StaffCatalogueService,"read">;
+  readonly staffCatalogue?: Pick<StaffCatalogueService,"read"> & Partial<Pick<StaffCatalogueService,"available">>;
   readonly staffManagement?: Pick<StaffManagementService,"read"> & Partial<Pick<StaffManagementService,"availableViews">>;
   readonly staffWorkspace?: Pick<StaffWorkspaceService,"availableViews"|"read"|"command">;
   readonly departmentAccess?: Pick<StaffWorkspaceService,'positions'>;
@@ -199,7 +199,9 @@ export async function createStaffPortal(options:{
             };
             for(const view of views)navigation.push(...paths[view]);
           }
-          if (profile.tenantId && options.staffCatalogue) navigation.push('/catalogue');
+          if (profile.tenantId && options.staffCatalogue && (!options.staffCatalogue.available ||
+              options.login && await options.login.readForSession(token,(identity,tenantId)=>
+                options.staffCatalogue!.available!(identity,tenantId)).catch(()=>false))) navigation.push('/catalogue');
           if (profile.tenantId && suspension) navigation.push('/staff/commands');
           if (profile.tenantId && publication) navigation.push('/catalogue/publication');
           const positions=departmentAccess ? await positionsFor(token):undefined;

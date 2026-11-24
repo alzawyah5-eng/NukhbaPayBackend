@@ -18,7 +18,7 @@ function minor(value: string): bigint {
 /** Uses an explicitly supplied read-only workload pool. Pending publication tables
  * are read only for their respective pricing views. No setup or connection here. */
 export function createStaffCatalogueReader(
-  pool: Pool,
+  pool: Pick<Pool, 'connect'>,
   availabilityByTenant: ReadonlyMap<string, readonly ConfiguredAvailability[]>,
 ) {
   const configuration = new Map([...availabilityByTenant].map(([tenant, rows]) =>

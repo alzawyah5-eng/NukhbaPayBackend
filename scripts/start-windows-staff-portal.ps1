@@ -52,6 +52,11 @@ $values['DB_STAFF_SESSION_EXPECTED_DATABASE_OID']=$evidence.databaseOid
 $values['DB_STAFF_SESSION_EXPECTED_SYSTEM_IDENTIFIER']=$evidence.systemIdentifier
 $values['DB_STAFF_SESSION_ROLE']='nukhabapay_session_backend'
 try {
+  if(!$StorageOnly -and $null -ne $Settings) {
+    foreach($key in 'NUKHBAPAY_LOCAL_CATALOGUE_SETUP_ID','DB_LOCAL_CATALOGUE_READER_PASSWORD') {
+      if($Settings[$key]) { $values[$key]=$Settings[$key] }
+    }
+  }
   $keys=@('ISSUER')
   if(!$StorageOnly){
     $tlsDir=Get-ReviewedTlsDirectory

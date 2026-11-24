@@ -31,6 +31,10 @@ export class StaffCatalogueService {
   readonly #cursors=new Map<string,{binding:string;revision:string;last:string;expires:number}>();
   constructor(private readonly deps:{authority:AdministrationAuthority;read(ticket:StaffCatalogueReadTicket):Promise<StaffCatalogueSnapshot>;
     audit(lease:AdministrationLease,view:StaffCatalogueView):Promise<void>;now:()=>Date}){}
+  async available(identity:VerifiedStaffIdentity,tenantId:string):Promise<boolean> {
+    const lease=await this.deps.authority.require(identity,tenantId,'catalog.read');
+    return lease.revalidate();
+  }
   async read(identity:VerifiedStaffIdentity,tenantId:string,view:StaffCatalogueView,query:Readonly<Record<string,unknown>>){
     if(!['countries','services','providers','products','offers','economics','imports','drafts','publications'].includes(view)||
       Object.keys(query).some(k=>!['country','group','service','provider','product','search','sort','limit','cursor'].includes(k)))throw new AdministrationError(400);

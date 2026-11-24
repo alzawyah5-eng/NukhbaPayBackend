@@ -7,7 +7,7 @@ import {prepareStaffLoginIntegration} from '../apps/admin-web/dist/staff-login-i
 import {readPendingAuth0Configuration, STAFF_PORTAL_PORT} from '../apps/admin-web/dist/auth0-configuration.js';
 import {createAdministrationAuthority, createStaffAdministration, StaffWorkspaceService} from '../packages/application/dist/application/src/index.js';
 import {parseIdentityRuntimeConfiguration, createWindowsStaffIdentityRuntime, IdentityRuntimeUnavailableError} from '../packages/database/dist/database/src/identity-runtime.js';
-import {createIdentityReaderPool,createIdentityWriterPool,createStaffAdministrationReader,createStaffWorkspaceStore} from '../packages/database/dist/database/src/index.js';
+import {createIdentityReaderPool,createIdentityWriterPool,createLocalCatalogueStorage,createStaffAdministrationReader,createStaffWorkspaceStore} from '../packages/database/dist/database/src/index.js';
 import {createWindowsStaffSessionStore} from '../packages/database/dist/database/src/staff-session-store.js';
 import {verifyWindowsStaffConnection,windowsSessionRole,windowsStaffDatabase,windowsStaffTarget} from '../packages/database/dist/database/src/windows-staff-target.js';
 
@@ -104,10 +104,10 @@ export async function startWindowsStaffPortal(env=process.env,{preflightOnly=fal
   const {identity,session,target,auth}=storageOnly?readWindowsStorageSettings(env):readWindowsStaffSettings(env);
   const issuer=storageOnly?env.NUKHBAPAY_STAFF_AUTH0_ISSUER:auth.issuer;
   if(typeof issuer!=='string' || !issuer.length)throw unavailable();
-  let iam,store,reader,writer,integration,portal;
+  let iam,store,reader,writer,catalogue,integration,portal;
   async function close() {
     integration?.close();
-    try {await portal?.close();} finally {await Promise.allSettled([iam?.close(),store?.close(),reader?.end(),writer?.end()]);}
+    try {await portal?.close();} finally {await Promise.allSettled([iam?.close(),store?.close(),reader?.end(),writer?.end(),catalogue?.close()]);}
   }
   let stage='restricted IAM database connections';
   try {
@@ -161,7 +161,16 @@ export async function startWindowsStaffPortal(env=process.env,{preflightOnly=fal
     const browserAssets=loadBrowserAssets(fileURLToPath(new URL('../apps/admin-web/dist/client/',import.meta.url)));
     const now=()=>new Date();
     const {repository,auditWriter}=iam;
-    const {staffAdministration}=createStaffAdministration({repository,auditWriter,now,readers:{staff:createStaffAdministrationReader(reader)}});
+    const setupId=env.NUKHBAPAY_LOCAL_CATALOGUE_SETUP_ID;
+    const cataloguePassword=env.DB_LOCAL_CATALOGUE_READER_PASSWORD;
+    if(setupId!==undefined || cataloguePassword!==undefined) {
+      stage='dedicated catalogue reader connection';
+      catalogue=await createLocalCatalogueStorage({setupId,password:cataloguePassword},new Map([[auth.tenantId,[]]]));
+      console.info('Dedicated local catalogue storage verified through its read-only role.');
+    }
+    const {staffAdministration,staffCatalogue}=createStaffAdministration({repository,auditWriter,now,readers:{
+      staff:createStaffAdministrationReader(reader),...(catalogue && {catalogue:catalogue.read}),
+    }});
     const staffWorkspace=new StaffWorkspaceService({repository,now,authority:createAdministrationAuthority(repository,now),
       store:createStaffWorkspaceStore(reader,writer)});
     stage='Auth0 staff session integration';
@@ -177,6 +186,7 @@ export async function startWindowsStaffPortal(env=process.env,{preflightOnly=fal
     stage='HTTPS listener on port 3001';
     portal=await createStaffPortal({pfx,certificate,passphrase,port:STAFF_PORTAL_PORT,browserAssets,environment:{NODE_ENV:'development'},
       sessions:integration.sessions,login:integration.login,staffManagement:staffAdministration,staffWorkspace,
+      ...(staffCatalogue && {staffCatalogue}),
       departmentAccess:staffWorkspace,windowsStaffStorageReady:ready});
     let closing;
     return Object.freeze({origin:portal.origin,close:()=>closing??=close()});

@@ -433,8 +433,13 @@ test('catalogue BFF forwards an allowlisted read with verified server session an
   const port=address.port;await new Promise<void>(resolve=>reservation.close(()=>resolve()));
   const origin=`https://localhost:${port}`,f=await fixture(`${origin}/auth/callback`);
   let calls=0,staffCalls=0;
+  let catalogueAvailable=true;
   const app=await createStaffPortal({pfx,certificate,passphrase,port,sessions:f.sessions,login:f.login,
-    staffCatalogue:{async read(identity,tenant,view,query){
+    staffCatalogue:{async available(identity,tenant){
+      assert.equal(identity.subject,'synthetic-staff');
+      assert.equal(tenant,config.tenantId);
+      return catalogueAvailable;
+    },async read(identity,tenant,view,query){
       calls++;
       assert.equal(identity.subject,'synthetic-staff');
       assert.equal(tenant,config.tenantId);
@@ -467,6 +472,8 @@ test('catalogue BFF forwards an allowlisted read with verified server session an
     assert.equal(calls,0);
     assert.deepEqual(JSON.parse((await call(origin,'/auth/me','GET',{cookie})).body).navigation,['/overview','/staff','/catalogue']);
     assert.deepEqual(JSON.parse((await call(origin,'/auth/workspace','GET',{cookie})).body).navigation,['/overview','/staff','/catalogue']);
+    catalogueAvailable=false;
+    assert.deepEqual(JSON.parse((await call(origin,'/auth/workspace','GET',{cookie})).body).navigation,['/overview','/staff']);
     assert.equal(staffCalls,0);
     assert.equal((await call(origin,'/staff-api/catalogue/countries?group=GCC','GET',{cookie})).status,200);
     assert.equal(calls,1);

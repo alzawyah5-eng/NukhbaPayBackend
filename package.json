@@ -35,6 +35,7 @@
     "staff:test": "pnpm staff:build && pnpm --filter @nukhbapay/admin-web test",
     "staff:start": "pnpm --filter @nukhbapay/admin-web start",
     "staff:local": "powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File scripts\\staff-local.ps1",
+    "catalogue:local": "powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File scripts\\staff-local.ps1 -Catalogue",
     "staff:dev": "powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File scripts\\dev-staff-portal.ps1",
     "staff:sessions:test:integration": "pnpm --filter @nukhbapay/api test:session:integration",
     "db:verify:sources": "node scripts/rehearse-reviewed-migrations.mjs --verify-only",

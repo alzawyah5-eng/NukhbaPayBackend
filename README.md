@@ -151,6 +151,8 @@ The Compose development stack uses PostgreSQL 17 and optional Redis. The Windows
 
 Verify frozen migration sources with `pnpm db:verify:sources`. Use the [migration rehearsal runbook](docs/security/migration-security-rehearsal.md) to apply migrations on its approved disposable target.
 
+Use the [local Master Catalogue runbook](docs/runbooks/local-master-catalogue.md) for the separate Windows development catalogue database.
+
 ---
 
 ## CI and release

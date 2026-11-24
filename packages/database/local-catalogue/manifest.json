@@ -1,0 +1,60 @@
+[
+  {
+    "name": "local_isolation_001",
+    "file": "001_isolation.sql",
+    "sha256": "fcd181891122407ae410bfa8637fce23eae68b72eed335a8fba80f9a76e7e27d"
+  },
+  {
+    "name": "local_refresh_storage_002",
+    "file": "002_refresh_storage.sql",
+    "sha256": "a4fd7b70df3b262cf331e5b80a2bd9ebfc0fdf1f7683135e245c71aedefc017c",
+    "before": [
+      {
+        "file": "012_catalogue_refresh_R2_PROPOSAL.sql",
+        "sha256": "9c71019d40c076f8e0397025e118fba33e80689f578296007d6be7085e0ea06a"
+      },
+      {
+        "file": "012_catalogue_refresh_write_fence_PROPOSAL.sql",
+        "sha256": "460f4c898d3ddd2127193578c004e574ab63a607935b856b4079dec8af9ae28e"
+      },
+      {
+        "file": "012_catalogue_refresh_reconciliation.sql",
+        "sha256": "6016fd659b0b2f18f4cde1210df3c116bd7eff34446ce50c157cb4e70701066a"
+      },
+      {
+        "file": "012_catalogue_refresh_disposition.sql",
+        "sha256": "40212499e4ac800e3da6b3df4c60402dfcb0be645321d1960aece7c2084c3e5a"
+      }
+    ]
+  },
+  {
+    "name": "local_price_storage_003",
+    "file": "003_price_storage.sql",
+    "sha256": "5aa5c1d367a8602e5e83a29b9fe8be83122d5eeaa4786a0109721eda6f2d6eb3"
+  },
+  {
+    "name": "local_publication_outbox_004",
+    "file": "004_publication_outbox.sql",
+    "sha256": "6513ba2041c0c531882f38d1e2d0dfe0ca2bcdeae5f16d28984663d99ac06dd3",
+    "before": [
+      {
+        "file": "013_catalogue_publication_outbox.sql",
+        "sha256": "9949405a6fc6b88ac2549feb1f40b0e0cb4d269bf18e9b77a71ba19b9f0e9aa9"
+      },
+      {
+        "file": "013_catalogue_publication_delivery_fence.sql",
+        "sha256": "289a2ee7be191570f275963f0d3c91eff5c4936c8fe352180204da671983623e"
+      }
+    ]
+  },
+  {
+    "name": "local_published_projection_005",
+    "file": "005_published_projection.sql",
+    "sha256": "6f4d22188cbbcc2185b9363c31b2c2f43ec0030648cc50c533085943327bdc1c"
+  },
+  {
+    "name": "local_submission_audit_006",
+    "file": "006_submission_audit.sql",
+    "sha256": "df82170d2fb5f0c25a2290ffd6151f72709927eeb7bf0cf61ab9ad45f2d29446"
+  }
+]
