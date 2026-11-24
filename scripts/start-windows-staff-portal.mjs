@@ -117,13 +117,27 @@ export async function startWindowsStaffPortal(env=process.env,{preflightOnly=fal
     stage='staff workspace schema and grants';
     reader=createIdentityReaderPool(identity,identity,client=>verifyWindowsStaffConnection(client,target,identity.readerRole));
     writer=createIdentityWriterPool(identity,identity,client=>verifyWindowsStaffConnection(client,target,identity.writerRole));
-    const ready=async()=>{
+    async function storageFailure() {
+      let check='workspace writer connection';
       try {
         await verifyWindowsStaffConnection(writer,target,identity.writerRole);
-        return await iam.checkReadiness() && await store.checkWindowsReadiness(issuer) && await workspaceReady(reader) && await workspaceWriterReady(writer);
-      } catch {return false;}
-    };
-    if(!await ready())throw unavailable();
+        check='IAM schema and audit grants';
+        if(!await iam.checkReadiness())return check;
+        check='session schema and issuer binding';
+        if(!await store.checkWindowsReadiness(issuer))return check;
+        check='workspace reader schema and grants';
+        if(!await workspaceReady(reader))return check;
+        check='workspace writer grants';
+        if(!await workspaceWriterReady(writer))return check;
+        return null;
+      } catch {return check;}
+    }
+    const ready=async()=>await storageFailure()===null;
+    const failedCheck=await storageFailure();
+    if(failedCheck){
+      stage=failedCheck;
+      throw unavailable();
+    }
     if(storageOnly){await close();return;}
     stage='active staff enrollment in the selected tenant';
     const scope=await reader.connect();
@@ -170,8 +184,9 @@ export async function startWindowsStaffPortal(env=process.env,{preflightOnly=fal
     await close();
     if(error instanceof EnrollmentMismatch)throw error;
     if(error instanceof IdentityRuntimeUnavailableError && error.windowsLogin){
-      const {role,reason}=error.windowsLogin;
-      throw new Error('Windows staff portal stopped at '+role+' ('+reason+')');
+      const {role,reason,failedChecks}=error.windowsLogin;
+      const detail=failedChecks?.length ? ': '+failedChecks.join(', ') : '';
+      throw new Error('Windows staff portal stopped at '+role+' ('+reason+detail+')');
     }
     throw new Error('Windows staff portal stopped at '+stage);
   }

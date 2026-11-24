@@ -26,3 +26,5 @@ scripts/test/windows-staff-migration-rehearsal.mjs text eol=lf
 scripts/start-windows-staff-portal.mjs text eol=lf
 scripts/start-windows-staff-portal.ps1 text eol=lf
 scripts/apply-windows-staff-schema.ps1 text eol=lf
+# Auth0 release tooling verifies the reviewed Action's exact LF source bytes.
+scripts/auth0/staff-human-principal.cjs text eol=lf

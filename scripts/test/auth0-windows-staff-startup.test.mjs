@@ -3,7 +3,7 @@ import {createRequire} from 'node:module';
 import test from 'node:test';
 import {readWindowsStaffSettings,startWindowsStaffPortal} from '../start-windows-staff-portal.mjs';
 import {readStaffAuth0TestConfiguration} from '../start-staff-auth0-test.mjs';
-import {verifyWindowsStaffConnection,windowsStaffTarget} from '../../packages/database/dist/database/src/windows-staff-target.js';
+import {verifyWindowsStaffConnection,windowsStaffTarget,WindowsStaffTargetMismatch} from '../../packages/database/dist/database/src/windows-staff-target.js';
 
 const reader='nukhabapay_identity_reader',writer='nukhabapay_identity_writer',session='nukhabapay_session_backend';
 const uri=role=>'postgresql://'+role+':offline-only-credential-'+role+'@127.0.0.1:5432/nukhbapay_staff';
@@ -49,17 +49,20 @@ test('the connection check requires a positive server result for the pinned role
   assert.equal(calls,1);
   for(const rows of [[],[{verified:null}],[{verified:false}],[{verified:'t'}],[{verified:true},{verified:true}]])
     await assert.rejects(verifyWindowsStaffConnection({query:async()=>({rows})},target,reader));
+  await assert.rejects(verifyWindowsStaffConnection({query:async()=>({
+    rows: [{verified: false, failed_checks: ['schema grants', 'private detail']}],
+  })},target,reader), {failedChecks: ['schema grants']});
 });
 
 test('portal reports the affected IAM role and a safe failure category', async t => {
   const requireDatabase = createRequire(new URL('../../packages/database/package.json', import.meta.url));
   const {Pool} = requireDatabase('pg');
   let failingRole = reader;
-  let failureCode = '28P01';
+  let failure = Object.assign(new Error('private error detail'), {code: '28P01'});
   t.mock.method(Pool.prototype, 'query', async function () {
     const role = new URL(this.options.connectionString).username;
     if (role === failingRole) {
-      throw Object.assign(new Error('private error detail'), {code: failureCode});
+      throw failure;
     }
     return {rowCount: 1, rows: [{
       name: role, rolcanlogin: true, rolsuper: false, rolcreatedb: false,
@@ -71,7 +74,14 @@ test('portal reports the affected IAM role and a safe failure category', async t
   await assert.rejects(startWindowsStaffPortal(config, {preflightOnly: true}),
     {message: 'Windows staff portal stopped at '+reader+' (password rejected)'});
   failingRole = writer;
-  failureCode = '42501';
+  failure = Object.assign(new Error('private error detail'), {code: '42501'});
   await assert.rejects(startWindowsStaffPortal(config, {preflightOnly: true}),
     {message: 'Windows staff portal stopped at '+writer+' (permission denied)'});
+  failingRole = reader;
+  failure = new WindowsStaffTargetMismatch(['database identity', 'private detail']);
+  await assert.rejects(startWindowsStaffPortal(config, {preflightOnly: true}),
+    {message: 'Windows staff portal stopped at '+reader+' (restricted role check failed: database identity)'});
+  failure = new Error('Connection terminated due to connection timeout');
+  await assert.rejects(startWindowsStaffPortal(config, {preflightOnly: true}),
+    {message: 'Windows staff portal stopped at '+reader+' (connection timed out)'});
 });

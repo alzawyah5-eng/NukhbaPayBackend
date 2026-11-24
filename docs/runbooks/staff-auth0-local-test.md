@@ -74,7 +74,17 @@ The same-origin application stays in the foreground. Use `Ctrl+C` to shut it dow
 
 ## Persistent Windows staff database
 
-For the development database `nukhbapay_staff`, run these commands from the repository root in a private PowerShell window.
+For an already enrolled Windows development database, open your own PowerShell terminal in the backend repository and run:
+
+```powershell
+corepack.cmd pnpm staff:local
+```
+
+On the first run, the launcher asks privately for the enrolled Auth0 User ID, the Staff Portal Client Secret, and the three existing PostgreSQL role passwords. It selects the staff tenant from the existing enrollment receipt. After the guarded preflight passes, it saves the private inputs with Windows DPAPI under the current user's LocalAppData folder. Later starts reuse the saved settings. Open `https://localhost:3001/login` when the launcher prints the link.
+
+Run `powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\scripts\staff-local.ps1 -Check` to verify a saved setup without starting a listener. Use `-Configure` after a credential rotation or enrollment change.
+
+For initial provisioning of `nukhbapay_staff`, use the following commands from the repository root in a private PowerShell window.
 
 1. Run `powershell.exe -NoProfile -File .\scripts\inspect-windows-staff-database.ps1`. Enter the local PostgreSQL administrator password at the hidden prompt. The inspection checks the registered Windows service, database owner, OID and cluster identifier, then records which workload roles and schemas are present.
 2. Run `powershell.exe -NoProfile -File .\scripts\connect-windows-staff-database.ps1` to grant database CONNECT to the existing restricted IAM reader and writer. Enter each role's own PostgreSQL password when prompted. To repeat only the login checks, append `-VerifyOnly`.

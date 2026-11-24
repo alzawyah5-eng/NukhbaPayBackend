@@ -1,11 +1,11 @@
 # NukhbaPay Backend — Core API, AI Service & Infrastructure Platform
 
-[![CI/CD Pipeline](https://github.com/alzawyah5-eng/NukhbaPayBackend/actions/workflows/ci.yml/badge.svg)](https://github.com/alzawyah5-eng/NukhbaPayBackend/actions/workflows/ci.yml)
+[![Backend CI](https://github.com/alzawyah5-eng/NukhbaPayBackend/actions/workflows/ci.yml/badge.svg)](https://github.com/alzawyah5-eng/NukhbaPayBackend/actions/workflows/ci.yml)
 [![Node Version](https://img.shields.io/badge/Node-24.x-brightgreen.svg)](https://nodejs.org/)
 [![pnpm Version](https://img.shields.io/badge/pnpm-10.x-orange.svg)](https://pnpm.io/)
 [![Python Version](https://img.shields.io/badge/Python-3.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://python.org/)
-[![NestJS](https://img.shields.io/badge/NestJS-11.x-E0234E.svg)](https://nestjs.com/)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16.x-336791.svg)](https://postgresql.org/)
+[![NestJS](https://img.shields.io/badge/NestJS-12.x-E0234E.svg)](https://nestjs.com/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17%20%7C%2018-336791.svg)](https://postgresql.org/)
 
 The enterprise financial backend for the **NukhbaPay** digital goods, gift cards, and payments platform. Follows strict Hexagonal (Ports & Adapters) and Clean Architecture boundaries with exact minor-unit financial arithmetic, AI-assisted catalog matching with hard parameter guards, immutable transaction outbox, and zero-trust IAM.
 
@@ -27,7 +27,7 @@ backend/
 │   ├── contracts/               # Shared TypeScript schemas and RPC boundaries
 │   ├── provider-adapters/       # Integrations for upstream providers (IronGate, SSL Wireless, Sandbox)
 │   └── provider-contracts/      # Formal vendor API contracts and normalization types
-├── infra/                       # Local Docker Compose (PostgreSQL 16, Redis, Local Stack)
+├── infra/                       # Local Docker Compose for PostgreSQL and Redis
 ├── scripts/                     # DB migration rehearsal, Auth0 enrollment, verification suites
 ├── docs/                        # Architecture Decision Records (ADRs), runbooks, security profiles
 └── tests/                       # Acceptance and integration test suites
@@ -39,7 +39,7 @@ backend/
 
 1. **Exact Financial Mathematics**: Zero IEEE-754 floating-point drift. All money calculations in AED are stored and computed in integer minor units (fills) with explicit half-up rounding.
 2. **Hard Equivalence AI Guards**: AI models (Gemini / Claude / local models) provide *advisory suggestions only*. Hard deterministic parameter guards verify brand, currency, country code, face value, and restrictions before any catalog mapping can be published.
-3. **Deny-by-Default Identity**: Zero anonymous endpoints except verified liveness (`GET /health`). Staff sessions are actor/version-bound with MFA observation.
+3. **Deny-by-Default Identity**: Staff and catalogue routes require the appropriate identity and scope. Process liveness is available at `GET /health/live`.
 4. **Disposable Migration Acceptance**: Database migrations (001–006) are tested against ephemeral random target databases before promotion.
 5. **Audited Transactional Outbox**: Atomic database state mutation with outbox records ensuring reliable messaging and reconciliation.
 
@@ -51,7 +51,7 @@ backend/
 
 - **Node.js**: `v24.x` (pinned in `.node-version`)
 - **pnpm**: `v10.x` (`corepack enable` or `npm install -g pnpm`)
-- **Python**: `3.11+` or `3.12+` or `3.13+`
+- **Python 3.12** for the CI AI suite. A local Python installation is also needed for architecture and offline checks.
 - **Docker**: For local PostgreSQL and Redis (optional for offline tests)
 
 ### 1. Clone & Install Dependencies
@@ -73,11 +73,19 @@ Copy `.env.example` to `.env`:
 cp .env.example .env
 ```
 
-Review database credentials, API host, port, and Auth0 settings in `.env`.
+The default API and offline tests can run without a database. Use the example for local configuration when a runbook calls for it. Provide private staff settings through the staff launcher prompts.
 
 ---
 
 ## 🧪 Running Verification & Tests
+
+Run the full offline build and regression suite from the repository root:
+
+```bash
+pnpm development:test:offline
+```
+
+It saves local evidence under `.local/`. PostgreSQL and real-provider acceptance have separate qualification commands.
 
 ### Offline Financial & Provider Tests
 Runs exact financial calculations and vendor integration adapters in memory without requiring a database:
@@ -121,29 +129,39 @@ pnpm api:build
 # Run API in development
 pnpm api:start
 ```
-API binds to `http://127.0.0.1:3000` by default.
+The API binds to `http://127.0.0.1:3000` by default. Check `/health/live` to verify startup.
 
-### Start Local Infrastructure (PostgreSQL & Redis)
-```bash
-docker compose -f infra/local/docker-compose.yml up -d
+### Start the Windows Staff Portal
+
+With the existing local database inspection and enrollment in place, run:
+
+```powershell
+corepack.cmd pnpm api:build
+corepack.cmd pnpm staff:local
 ```
 
-### Database Migrations
-```bash
-# Run verified migrations against configured database
-pnpm db:migrate
-```
+First-time setup collects credentials at hidden prompts and saves them privately for your Windows account after preflight passes. Open `https://localhost:3001/login` once the launcher prints the link. [Windows Auth0 and PostgreSQL runbook](docs/runbooks/staff-auth0-local-test.md)
+
+### Local infrastructure
+
+The Compose development stack uses PostgreSQL 17 and optional Redis. The Windows Staff Portal uses the separately configured PostgreSQL 18 service. Follow the [local infrastructure runbook](infra/local/README.md) when selecting a target and port.
+
+### Database migrations
+
+Verify frozen migration sources with `pnpm db:verify:sources`. Use the [migration rehearsal runbook](docs/security/migration-security-rehearsal.md) to apply migrations on its approved disposable target.
 
 ---
 
-## 🔄 CI/CD Pipeline
+## CI and release
 
-The repository includes a comprehensive **GitHub Actions CI/CD pipeline** (`.github/workflows/ci.yml`):
+GitHub Actions runs the following checks for pushes and pull requests to `main`:
 
 - **Node.js Test Matrix**: Pinned dependency caching, domain & provider tests, TypeScript compile-time typecheck, and application builds.
 - **Python AI Suite**: Runs AI gateway and equivalence guard unit tests.
 - **Scaffold Check**: Automatically enforces architecture boundaries on every PR.
 - **Docker Compose Validation**: Ensures infrastructure definitions are syntax-valid.
+
+Deployment and operational acceptance are separate from commit validation.
 
 ---
 

@@ -1,10 +1,14 @@
 [CmdletBinding()]
-param([switch]$PreflightOnly,[switch]$StorageOnly)
+param([switch]$PreflightOnly,[switch]$StorageOnly,[System.Collections.IDictionary]$Settings)
 $ErrorActionPreference='Stop'
 function Unprotect-LocalValue([Security.SecureString]$Value) {
   $buffer=[Runtime.InteropServices.Marshal]::SecureStringToBSTR($Value)
   try {return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($buffer)}
   finally {[Runtime.InteropServices.Marshal]::ZeroFreeBSTR($buffer)}
+}
+function Read-PortalSetting([string]$Name) {
+  if($null -ne $Settings){return $Settings[$Name]}
+  return [Environment]::GetEnvironmentVariable($Name)
 }
 $project=(Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $evidence=Get-Content -Raw -LiteralPath (Join-Path $project '.local\windows-staff-inspection.json') | ConvertFrom-Json
@@ -42,6 +46,7 @@ $values['NODE_ENV']='development'
 $values['NUKHBAPAY_ENV']='local'
 $values['NUKHBAPAY_ENVIRONMENT']='development'
 $values['NUKHBAPAY_STAFF_SESSION_MODE']='windows-staff-development'
+$values['DB_IDENTITY_CONNECTION_TIMEOUT_MS']='10000'
 $values['NUKHBAPAY_STAFF_AUTH0_ACCESS_TOKEN_AUDIENCE_MODE']='api-and-userinfo'
 $values['DB_STAFF_SESSION_EXPECTED_DATABASE_OID']=$evidence.databaseOid
 $values['DB_STAFF_SESSION_EXPECTED_SYSTEM_IDENTIFIER']=$evidence.systemIdentifier
@@ -53,20 +58,21 @@ try {
     $values['NUKHBAPAY_STAFF_TLS_PFX_PATH']=Join-Path $tlsDir 'localhost.pfx'
     $values['NUKHBAPAY_STAFF_TLS_CERT_PATH']=Join-Path $tlsDir 'localhost.cer'
     $values['NUKHBAPAY_STAFF_TLS_PASSPHRASE']=Unprotect-LocalValue (Import-Clixml -LiteralPath (Join-Path $tlsDir 'localhost.passphrase.clixml'))
-    $values['NUKHBAPAY_STAFF_ENROLLMENT_SUBJECT']=$env:NUKHBAPAY_STAFF_ENROLLMENT_SUBJECT
-    if(!$env:NUKHBAPAY_STAFF_ENROLLMENT_SUBJECT){$values['NUKHBAPAY_STAFF_ENROLLMENT_SUBJECT']=Unprotect-LocalValue (Read-Host 'Existing enrolled Auth0 test User ID for the startup membership check' -AsSecureString)}
+    $subject=Read-PortalSetting 'NUKHBAPAY_STAFF_ENROLLMENT_SUBJECT'
+    $values['NUKHBAPAY_STAFF_ENROLLMENT_SUBJECT']=$subject
+    if(!$subject){$values['NUKHBAPAY_STAFF_ENROLLMENT_SUBJECT']=Unprotect-LocalValue (Read-Host 'Existing enrolled Auth0 test User ID for the startup membership check' -AsSecureString)}
     $keys+=@('CLIENT_ID','CLIENT_SECRET','AUDIENCE','STAFF_KIND_CLAIM','TENANT_ID')
   }
   foreach($key in $keys){
     $field='NUKHBAPAY_STAFF_AUTH0_'+$key
-    $configured=[Environment]::GetEnvironmentVariable($field)
+    $configured=Read-PortalSetting $field
     if($configured){$values[$field]=$configured}
     if(!$values[$field]){
       $values[$field]=Unprotect-LocalValue (Read-Host ("Auth0 test "+$key+" for the persistent staff tenant") -AsSecureString)
     }
   }
   foreach($binding in @(@('DB_IDENTITY_READER_URL','nukhabapay_identity_reader'),@('DB_IDENTITY_WRITER_URL','nukhabapay_identity_writer'),@('DB_STAFF_SESSION_URL','nukhabapay_session_backend'))){
-    $configured=[Environment]::GetEnvironmentVariable($binding[0])
+    $configured=Read-PortalSetting $binding[0]
     if($configured){$values[$binding[0]]=$configured}
     if(!$values[$binding[0]]){
       $password=Unprotect-LocalValue (Read-Host ('Database password for '+$binding[1]) -AsSecureString)
@@ -80,7 +86,7 @@ try {
     $preflight=[Diagnostics.Process]::Start($launch)
     try {$preflight.WaitForExit();$code=$preflight.ExitCode}finally{$preflight.Dispose()}
     if($code -eq 0){break}
-    if($code -ne 2 -or $StorageOnly -or $env:NUKHBAPAY_STAFF_ENROLLMENT_SUBJECT){throw 'Staff portal preflight stopped.'}
+    if($code -ne 2 -or $StorageOnly -or $subject){throw 'Staff portal preflight stopped.'}
     $retry=Read-Host 'Paste the enrolled SYMH User ID from the Auth0 test user profile (including auth0|), or press Enter to stop' -AsSecureString
     try {
       if(!$retry.Length){throw 'Enrollment retry cancelled.'}
@@ -109,4 +115,4 @@ try {
   $launch.Arguments='scripts/start-windows-staff-portal.mjs'
   $portal=[Diagnostics.Process]::Start($launch)
   try {$portal.WaitForExit();if($portal.ExitCode -ne 0){throw 'Windows staff portal stopped.'}}finally{$portal.Dispose()}
-}finally{$configured=$null;$values.Clear()}
+}finally{$configured=$null;$subject=$null;$values.Clear()}

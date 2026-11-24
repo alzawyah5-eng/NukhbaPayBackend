@@ -2,7 +2,7 @@ import type { Pool } from "pg";
 import { parseIdentityRuntimeConfiguration } from "./identity-runtime.config.js";
 import { createIdentityReaderPool, createIdentityWriterPool } from "./pool.js";
 import { SecurityAuditPostgresRepository, StaffIdentityPostgresRepository } from "./repositories/staff-identity-repository.js";
-import { verifyWindowsStaffConnection, windowsStaffDatabase, windowsStaffTarget, type WindowsStaffTarget } from './windows-staff-target.js';
+import { verifyWindowsStaffConnection, windowsStaffDatabase, windowsStaffTarget, WindowsStaffTargetMismatch, type WindowsStaffTarget } from './windows-staff-target.js';
 import type { IdentityRuntimeConfiguration } from './identity-runtime.config.js';
 
 export { parseIdentityRuntimeConfiguration } from "./identity-runtime.config.js";
@@ -14,7 +14,9 @@ export class IdentityRuntimeUnavailableError extends Error {
     readonly windowsLogin?: Readonly<{
       role: string;
       reason: "password rejected" | "authentication rejected" | "permission denied" |
-        "connection unavailable" | "connection or restricted role check failed";
+        "connection unavailable" | "connection timed out" | "restricted role check failed" |
+        "connection or restricted role check failed";
+      failedChecks?: readonly string[];
     }>,
   ) {
     super("Restricted IAM runtime unavailable");
@@ -90,6 +92,16 @@ async function openIdentityRuntime(config: IdentityRuntimeConfiguration, target?
   } catch (error) {
     await close().catch(() => undefined);
     if (!target) throw new IdentityRuntimeUnavailableError();
+    if (error instanceof WindowsStaffTargetMismatch) {
+      throw new IdentityRuntimeUnavailableError({
+        role: loginRole, reason: "restricted role check failed", failedChecks: error.failedChecks,
+      });
+    }
+    if (error instanceof Error && [
+      "Connection terminated due to connection timeout", "timeout exceeded when trying to connect",
+    ].includes(error.message)) {
+      throw new IdentityRuntimeUnavailableError({ role: loginRole, reason: "connection timed out" });
+    }
     const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
     let reason: NonNullable<IdentityRuntimeUnavailableError["windowsLogin"]>["reason"];
     switch (code) {
