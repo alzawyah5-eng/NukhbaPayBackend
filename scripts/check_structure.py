@@ -2,11 +2,24 @@
 """Lightweight scaffold checks, not a compiler, API test or security assessment."""
 from pathlib import Path
 import json
+import os
 import re
 import sys
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
+LOCAL_DIRECTORIES = {
+    ".git", ".local", ".pnpm-store", ".worktrees", "artifacts", "dist",
+    "dist-test", "node_modules", "nukhabapay-worktrees", "__pycache__",
+}
+
+
+def source_files(base):
+    for folder, directories, files in os.walk(base):
+        directories[:] = [name for name in directories if name not in LOCAL_DIRECTORIES]
+        yield from (Path(folder) / name for name in files)
+
+
 REQUIRED = [
     "README.md", "ARCHITECTURE.md", "package.json", "pnpm-workspace.yaml",
     "apps/api/src/modules/quotes/README.md",
@@ -38,8 +51,8 @@ for relative in REQUIRED:
         errors.append(f"Missing required file: {relative}")
 
 json_count = 0
-for path in ROOT.rglob("*.json"):
-    if any(part in {"node_modules", "__pycache__"} for part in path.parts):
+for path in source_files(ROOT):
+    if path.suffix != ".json":
         continue
     try:
         json.loads(path.read_text())
@@ -60,8 +73,8 @@ for path in (ROOT / "packages/contracts/public").glob("*.json"):
         errors.append(f"Private fields in public schema {path.name}: {sorted(overlap)}")
 
 # These checks detect selected obvious relative/package import violations only.
-for path in (ROOT / "packages").rglob("*.ts"):
-    if any(part in {"node_modules", "__pycache__", "dist", "dist-test"} for part in path.parts):
+for path in source_files(ROOT / "packages"):
+    if path.suffix != ".ts":
         continue
     if "/test/" in path.as_posix():
         continue
@@ -84,9 +97,7 @@ if boundary.returncode:
     errors.append("Browser/BFF boundary rejected:\n" + boundary.stderr.strip())
 
 for client in ["mobile", "kiosk-client"]:
-    for path in (ROOT / "apps" / client).rglob("*"):
-        if any(part in {"node_modules", "__pycache__", "dist", "dist-test"} for part in path.parts):
-            continue
+    for path in source_files(ROOT / "apps" / client):
         if path.suffix not in {".ts", ".tsx", ".js", ".jsx"}:
             continue
         text = path.read_text()
