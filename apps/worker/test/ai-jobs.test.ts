@@ -4,7 +4,8 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import test from "node:test";
 import { generateKeyPair, exportJWK, SignJWT } from "jose";
-import { AI_JOB_AUDIENCE, AiJobService, AiJobError, consumeAiJobTicket, type AiJobRecord, type AiJobAudit, type AiServiceBinding,
+import { AI_JOB_AUDIENCE, AiJobService, AiJobError, consumeAiJobTicket, reviewHybridPricing,
+  type AiApprovedPair, type DraftPublicationRequest, type AiJobRecord, type AiJobAudit, type AiServiceBinding,
   type AiJobStore, type AiJobScope, type AiEngineInput, type AiJobRequest, type AiEngine } from "@nukhbapay/application";
 import { InternalAiJobBoundary, SyntheticAiServiceVerifier } from "../src/jobs/product-intelligence/boundary.js";
 import { MockPythonAiEngine } from "../src/jobs/product-intelligence/python-engine.js";
@@ -44,13 +45,15 @@ function fixture(scenario?: ConstructorParameters<typeof MockPythonAiEngine>[0][
     jobs.clear(); for (const [id, j] of pending) jobs.set(id, j); audit.push(...events); return result;
   } };
   const engine = override ?? new MockPythonAiEngine({ repositoryRoot: root, pythonExecutable: python, ...(scenario ? { mockScenario: scenario } : {}) });
+  const source=():AiApprovedPair=>({tenantId:state.sourceTenant,snapshotId:request.snapshotId,sourceVersion:request.sourceVersion,offerId:request.offerId,
+    candidateProductId:request.candidateProductId,approved:true,status:'COMPLETE',accountActive:true,
+    observedAt:'2026-11-17T09:00:00Z',completedAt:'2026-11-17T09:01:00Z',validUntil:'2026-11-17T12:00:00Z',
+    provider:p,candidate:{...p,record_id:'synthetic-canonical'}});
   const service = new AiJobService({ capability: "ISOLATED_SYNTHETIC_AI_JOBS_ONLY", engine, store, now: () => new Date(state.time),
     bindings: { async find(id): Promise<AiServiceBinding> { return { issuer, subject: id.subject, clientId: id.clientId, tenantId: tenant, scope: id.scope, enabled: state.enabled, version: "1" }; } },
-    sources: { async read() { return { tenantId: state.sourceTenant, snapshotId: request.snapshotId, sourceVersion: request.sourceVersion, offerId: request.offerId,
-      candidateProductId: request.candidateProductId, approved: true, status: "COMPLETE", accountActive: true, observedAt: "2026-11-17T09:00:00Z", completedAt: "2026-11-17T09:01:00Z", validUntil: "2026-11-17T12:00:00Z",
-      provider: p, candidate: { ...p, record_id: "synthetic-canonical" } }; } } });
+    sources: { async read() { return source(); } } });
   const boundary = new InternalAiJobBoundary({ verifier: new SyntheticAiServiceVerifier(issuer, [jwk], () => new Date(state.time)), service });
-  return { boundary, request, jobs, audit, state, engine, tenant };
+  return { boundary, request, jobs, audit, state, engine, tenant, source };
 }
 async function finish(f: ReturnType<typeof fixture>, id: string) {
   let result = await f.boundary.process(await token("ai.jobs.process"), id);
@@ -59,6 +62,31 @@ async function finish(f: ReturnType<typeof fixture>, id: string) {
   if (result.state === "RETRYABLE") { f.state.time += 1000; result = await f.boundary.process(await token("ai.jobs.process"), id); }
   return result;
 }
+test('committed hybrid advice binds an exact deterministic price draft to one verified offer',async()=>{
+  const f=fixture('primary_failure'),pair=f.source();
+  const product:DraftPublicationRequest['product']={canonicalProductId:'fixture-gift',brand:'synthetic-brand',
+    redemptionCountry:'AE',currency:'AED',faceValueMinor:10000n,fulfillmentMethod:'DIGITAL_PIN',termsVersion:'v1'};
+  const draft:DraftPublicationRequest={tenantId:f.tenant,productId:pair.candidateProductId,product,
+    sourceSnapshots:[{snapshotId:pair.snapshotId,providerAccountId:randomUUID(),snapshotKey:'fixture',sourceVersion:pair.sourceVersion,
+      observedAt:pair.observedAt,completedAt:pair.completedAt,status:'COMPLETE'}],
+    offers:[{providerId:'FINXPLOR',offerId:pair.offerId,snapshotId:pair.snapshotId,identity:product,providerDebitMinor:9700n,
+      upfrontDiscountMinor:300n,additionalProviderFeeMinor:0n,available:true,eligible:true,mappingStatus:'APPROVED',
+      observedAt:pair.observedAt,validUntil:pair.validUntil}],
+    pricingPolicy:{version:'fixture-v1',serviceFeeMinor:200n,maximumServiceFeeMinor:200n,taxAmountMinor:0n,
+      paymentFeeBasisPoints:150,paymentFixedFeeMinor:20n,agentCommissionMinor:50n,minimumContributionMinor:100n,maximumOfferAgeMs:86400000},
+    evaluatedAt:now.toISOString(),expectedPreviousVersion:0,idempotencyKey:randomUUID()};
+  const start=await f.boundary.submit(await token(),f.request);
+  assert.equal((await finish(f,start.id)).state,'SUCCEEDED');
+  const job=f.jobs.get(start.id)!;
+  assert.equal(job.summary?.provider,'anthropic');
+  const value=reviewHybridPricing(draft,{job,pair},new Date(f.state.time));
+  assert.equal(value.draft.totalAmountMinor,10200n);
+  assert.equal(value.draft.expectedContributionMinor,277n);
+  assert.equal(value.advisory.canAuthorize,false);
+  assert.equal(value.draft.activationAllowed,false);
+  assert.throws(()=>reviewHybridPricing(draft,{job,pair:{...pair,tenantId:randomUUID()}},now));
+  assert.throws(()=>reviewHybridPricing(draft,{job,pair},new Date(pair.validUntil)));
+});
 test("default internal worker has no enabled authorization composition", async () => {
   await assert.rejects(new InternalAiJobBoundary().submit("", {}), (e: unknown) => e instanceof AiJobError && e.status === 503);
   assert.throws(() => new SyntheticAiServiceVerifier("https://production.example/", [jwk], () => now));

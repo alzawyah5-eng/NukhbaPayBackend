@@ -17,6 +17,8 @@ Backend integration uses `createApiApplication({identity, staffAdministration, s
 | GET | /catalogue/offers | Private provider cost, freshness, availability; also pricing.read |
 | GET | /catalogue/economics | Existing deterministic pricing result, formatted AED fields, canPublish=false; also pricing.read |
 | GET | /catalogue/imports | Import status and observation time |
+| GET | /catalogue/discoveries | Imported products awaiting review, with provider-reported denominations and source countries |
+| GET | /catalogue/discovery-providers | Provider names for discovery browsing and whether each has tenant imports |
 | GET | /catalogue/drafts | Version and publication state; also pricing.read |
 
 Examples for an authorized backend client (placeholder values are not credentials):
@@ -26,7 +28,13 @@ GET /v1/admin/tenants/10000000-0000-4000-8000-000000000001/catalogue/providers?c
 Authorization: Bearer <backend-held-approved-human-access-token>
 ```
 
-Catalogue response shape is `{revision,items,next}`. `next` is an opaque, one-use, actor/tenant/view/query/revision-bound cursor valid for at most 60 seconds and token expiry. Reuse the same filters, limit and sort with `cursor=...`; replay or revision changes return 409. Filters unsupported by a view return 400. countries accepts country/group; services/providers accept country/group/service/provider; products/offers/economics additionally accept product/search; imports accepts provider; drafts accepts product. All views accept sort/limit/cursor. Supported filter values: country, group (GCC/OTHER_ASIA/AFRICA/EUROPE), service, provider, product UUID, search, sort=id|name, limit=1..50. Country identifiers are ISO alpha-2 references from [UN M49](https://unstats.un.org/unsd/methodology/m49/overview/); geography never establishes availability.
+Catalogue pages return `{revision,items,count,next,previous}`. The count reflects the current filters. `next` and `previous` are opaque, one-use cursors bound to the actor, tenant, view, query and revision. They expire within 60 seconds or at token expiry, whichever comes first. Reuse the same filters, limit and sort with `cursor=...`. Replay or revision changes return 409.
+
+All views accept `sort=id|name`, `limit=1..50` and `cursor`. Countries accept `country` and `group` (GCC, OTHER_ASIA, AFRICA, EUROPE). Services and providers also accept `service` and `provider`. Products, offers and economics additionally accept `product` (UUID) and `search`. Imports accept `provider`. Drafts and publication history accept `product`. Discoveries accept `provider`, `search`, `sourceCountry` (three uppercase letters), `sourceRegion` and `productType`. The discovery response includes `sourceMarkets` and `productTypes` for the selected provider before search, region, country and product type filtering. Unsupported filters return 400.
+
+The local discovery provider selection lists known providers with local HTTPS endpoint settings and providers with tenant imports. It returns display names and import status. The list requires catalogue read access and sends no provider requests.
+
+Reference geography uses ISO alpha-2 country codes. The `configured` flag reports enabled catalogue services separately from geography. [UN M49 reference](https://unstats.un.org/unsd/methodology/m49/overview/)
 
 Staff request body uses the existing `StaffRequestCommand`: server-selected SUBMIT, UUID key and id, decimal-string version/expectedAuthzVersion/expectedMembershipVersion, previousDigest, UUID targetStaffId, exact operation, proposedRoles and expiresAtMs. Unknown keys, caller MFA/approval/actor fields and unsafe role proposals fail. No invitation is delivered and no staff, membership, grant or session is changed. Lifecycle mutations, privilege delegation and revocation remain blocked by ADR 0013 assurance/approval/executor gates. No activation or publication route was added.
 

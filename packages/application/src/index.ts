@@ -9,6 +9,7 @@ export type {
 } from "./catalog/synthetic-provider-import.js";
 export { assertGeneratedDraftPublicationCandidate, classifyAdvisoryPublicationEvidence, generateDraftPublicationCandidate } from "./catalog/publication-candidate.js";
 export type { AdvisoryPublicationEvidence, DraftPublicationCandidate, DraftPublicationRequest, PublicationSourceSnapshot } from "./catalog/publication-candidate.js";
+export { reviewHybridPricing, type HybridPricingEvidence } from './catalog/hybrid-pricing.js';
 export {
   authorizeStaffAccess,
   resolveStaffIdentity,
@@ -112,3 +113,4 @@ export * from './catalog/durable-refresh.js';
 
 export * from './administration/composition.js';
 export * from './administration/staff-workspace.js';
+export { calculateAedPricePreview, type LocalPricePreviewBasis } from './catalog/price-preview.js';

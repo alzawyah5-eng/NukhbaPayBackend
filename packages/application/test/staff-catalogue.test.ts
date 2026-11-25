@@ -33,6 +33,11 @@ test('continuations bind filter, sort, tenant actor and revision and cannot repl
  await assert.rejects(()=>f.service.read(f.identity,f.tenant,'products',{limit:'1',sort:'id',cursor:first.next}),{status:409});
  const next=await f.service.read(f.identity,f.tenant,'products',{limit:'1',sort:'name',cursor:first.next});assert.notEqual(next.items[0]!.id,first.items[0]!.id);
  await assert.rejects(()=>f.service.read(f.identity,f.tenant,'products',{limit:'1',sort:'name',cursor:first.next}),{status:409});
+ assert.equal(first.count,2);assert.equal(first.previous,null);assert.equal(next.next,null);assert.ok(next.previous);
+ await assert.rejects(()=>f.service.read(f.identity,f.tenant,'products',{limit:'2',sort:'name',cursor:next.previous}),{status:409});
+ const previous=await f.service.read(f.identity,f.tenant,'products',{limit:'1',sort:'name',cursor:next.previous});
+ assert.deepEqual(previous.items,first.items);assert.ok(previous.next);assert.equal(previous.previous,null);
+ await assert.rejects(()=>f.service.read(f.identity,f.tenant,'products',{limit:'1',sort:'name',cursor:next.previous}),{status:409});
 });
 test('foreign snapshots, malformed queries and revoked authority never disclose catalogue state',async()=>{
  const f=await fixture();for(const q of [{limit:'0'},{sort:'providerCost'},{tenantId:randomUUID()},{country:'ZZ'},{search:'a\nb'}])await assert.rejects(()=>f.service.read(f.identity,f.tenant,'products',q),{status:400});
@@ -63,4 +68,64 @@ test('publication history is scoped, audited and paged by exact ledger revision'
  pricing=false;
  await assert.rejects(()=>service.read(f.identity,f.tenant,'publications',{product}),{status:403});
  assert.equal(audits,2);
+});
+
+test('discoveries disclose exact reported denominations without creating priced or publishable offers', async()=>{
+ const f=await fixture(),id=randomUUID();
+ const discovery={id,providerId:'FINXPLOR',sourceId:'pilot-item',name:'Sandbox card',brand:'Sandbox',
+   sourceCountry:'GTM',currency:'USD',category:'Gift Card',delivery:'email',observedAt:SYNTHETIC_NOW,
+   minAmount:'0.00',maxAmount:'9007199254740993.07',denominations:['9007199254740993.07'],
+   reviewReason:'OUTSIDE_PRICED_CATALOGUE_SCOPE' as const,privateToken:'discard'};
+ Object.assign(f.data,{discoveries:[discovery]});
+ f.denyPricing();
+ const page=await f.service.read(f.identity,f.tenant,'discoveries',{provider:'FINXPLOR',search:'Finxplore'});
+ assert.equal(page.items.length,1);
+ assert.equal(page.count,1);
+ assert.deepEqual(page.sourceCountries,['GTM']);
+ assert.equal(page.items[0]!['maxAmount'],'9007199254740993.07');
+ assert.equal(page.items[0]!['reviewReason'],'OUTSIDE_PRICED_CATALOGUE_SCOPE');
+ assert.equal(page.items[0]!['status'],'DISCOVERY_ONLY');
+ assert.equal(page.items[0]!['sourceCountryCode'],'GT');
+ assert.deepEqual(page.items[0]!['mappingBlockers'],['SERVICE_COUNTRY','CURRENCY']);
+ assert.equal(page.items[0]!['pricing'],'UNVERIFIED');
+ assert.deepEqual(page.items[0]!['pricingReview'],{matching:'OUTSIDE_SCOPE',state:'AWAITING_VERIFIED_TERMS',salePrice:null});
+ assert.equal(page.items[0]!['privateToken'],undefined);
+ assert.equal(page.items[0]!['available'],undefined);
+ assert.equal(page.items[0]!['total'],undefined);
+ assert.equal(f.audits(),1);
+ const filtered=await f.service.read(f.identity,f.tenant,'discoveries',{sourceCountry:'ARE'});
+ assert.equal(filtered.count,0);assert.deepEqual(filtered.sourceCountries,['GTM']);
+ await assert.rejects(()=>f.service.read(f.identity,f.tenant,'discoveries',{sourceCountry:'AE'}),{status:400});
+ await assert.rejects(()=>f.service.read(f.identity,randomUUID(),'discoveries',{}),{status:503});
+ f.revoke();
+ await assert.rejects(()=>f.service.read(f.identity,f.tenant,'discoveries',{}),{status:403});
+ assert.equal(f.audits(),2);
+});
+
+test('discovery providers merge the configured directory with tenant imports and filter by source market and product type',async()=>{
+ const f=await fixture();
+ const base={id:randomUUID(),providerId:'FINXPLOR',sourceId:'gift',name:'Card',brand:'Fixture',sourceCountry:'GTM',
+   currency:'USD',category:'Gift Card',delivery:'email',observedAt:SYNTHETIC_NOW,minAmount:'1.00',maxAmount:'1.00',
+   denominations:['1.00'],reviewReason:'CANONICAL_MAPPING_REQUIRED' as const};
+ const data={...f.data,discoveryProviderIds:['FINXPLOR'],discoveries:[base,
+   {...base,id:randomUUID(),sourceId:'mobile',name:'Data',sourceCountry:'NGA',category:'Mobile & Telecom'},
+   {...base,id:randomUUID(),sourceId:'other',providerId:'IRONGATE',sourceCountry:'IDN'}]};
+ const service=new StaffCatalogueService({now:()=>new Date(SYNTHETIC_NOW),
+   authority:{require:async()=>({staffId:randomUUID(),tenantId:f.tenant,revalidate:async()=>true})},
+   read:async ticket=>{consumeStaffCatalogueRead(ticket);return data;},audit:async()=>{},configuredDiscoveryProviders:['FINXPLOR','IPAY','UNKNOWN']});
+ const directory=(await service.read(f.identity,f.tenant,'discovery-providers',{})).items;
+ assert.deepEqual(directory.map(({id,name,hasDiscoveries})=>({id,name,hasDiscoveries})),[
+   {id:'FINXPLOR',name:'Finxplor',hasDiscoveries:true},{id:'IPAY',name:'iPay / Qore3',hasDiscoveries:false},
+ ]);
+ assert.deepEqual(directory[0]?.['functions'],[
+   {name:'List products',method:'GET',path:'/api/v1/products',verification:'Sandbox imported'},
+   {name:'Get product details',method:'GET',path:'/api/v1/products/:productId',verification:'Mock verified'},
+ ]);
+ const mobile=await service.read(f.identity,f.tenant,'discoveries',{provider:'FINXPLOR',sourceRegion:'Africa',sourceCountry:'NGA',productType:'Mobile recharge'});
+ assert.deepEqual(mobile.items.map(row=>row.name),['Data']);
+ assert.deepEqual(mobile.sourceMarkets,[{id:'GTM',name:'Guatemala',region:'Americas'},{id:'NGA',name:'Nigeria',region:'Africa'}]);
+ assert.deepEqual(mobile.productTypes,['Gift cards','Mobile recharge']);
+ assert.equal((await service.read(f.identity,f.tenant,'discoveries',{provider:'FINXPLOR',productType:'Gift cards'})).count,1);
+ assert.equal((await service.read(f.identity,f.tenant,'discoveries',{provider:'IPAY'})).count,0);
+ await assert.rejects(()=>service.read(f.identity,f.tenant,'discoveries',{sourceRegion:'unknown'}),{status:400});
 });

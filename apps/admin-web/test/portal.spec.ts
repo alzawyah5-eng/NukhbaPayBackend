@@ -30,6 +30,36 @@ function call(origin:string,path='/',method='GET',headers:Record<string,string>=
     });req.on('error',reject);if(body)req.write(body);req.end();
   });
 }
+test('stale session and parallel login callbacks recover without removing the current transaction',async()=>{
+  const reservation=createNetServer();
+  await new Promise<void>(resolve=>reservation.listen(0,'127.0.0.1',resolve));
+  const address=reservation.address();assert.ok(address&&typeof address!=='string');const port=address.port;
+  await new Promise<void>(resolve=>reservation.close(()=>resolve()));
+  const origin=`https://localhost:${port}`,f=await fixture(origin+'/auth/callback');
+  const app=await createStaffPortal({pfx,certificate,passphrase,port,sessions:f.sessions,login:f.login});
+  try{
+    const oldCookie=staffCookie('o'.repeat(43)).split(';')[0]!;
+    const stale=await call(origin,'/auth/workspace','GET',{cookie:oldCookie});
+    assert.equal(stale.status,401);
+    assert.equal(stale.headers['set-cookie']?.length,2);
+    assert.ok(stale.headers['set-cookie']?.every(value=>value.includes('Max-Age=0')));
+    const first=f.callbackFor(f.login.begin());
+    const latest=f.callbackFor(f.login.begin(undefined,first.cookie));
+    const pendingCookie=latest.cookieHeader.split(';')[0]!;
+    const wrong=await call(origin,first.callback,'GET',{cookie:pendingCookie});
+    assert.equal(wrong.status,401);
+    assert.equal(wrong.headers['set-cookie'],undefined);
+    assert.equal(f.exchanges(),0);
+    const correct=await call(origin,latest.callback,'GET',{cookie:pendingCookie});
+    assert.equal(correct.status,303);
+    assert.equal(f.exchanges(),1);
+    const activeCookie=correct.headers['set-cookie']?.[1]?.split(';')[0];
+    assert.ok(activeCookie);
+    assert.equal((await call(origin,'/auth/workspace','GET',{cookie:activeCookie})).status,200);
+    assert.equal((await call(origin,latest.callback,'GET',{cookie:pendingCookie})).status,401);
+    assert.equal(f.exchanges(),1);
+  }finally{await app.close();f.login.close();}
+});
 test('staff workspace routes require a real browser session and CSRF, and carry only the session tenant',async()=>{
   const reservation=createNetServer();
   await new Promise<void>(resolve=>reservation.listen(0,'127.0.0.1',resolve));
@@ -92,12 +122,21 @@ test('department login scopes direct reads and writes to the selected live grant
   let writes=0,reads=0;
   let catalogueReads=0, replacePricingGrant=false;
   let nativeStorageAvailable=false;
+  const discoveryId=randomUUID();
+  let currentDiscovery=true;
   const app=await createStaffPortal({pfx,certificate,passphrase,port,environment:{NODE_ENV:'development'},login:integration.login,
     windowsStaffStorageReady:async()=>nativeStorageAvailable,
-    staffCatalogue:{read:async()=> {
+    localCataloguePreview:true,
+    localPricePreview:{tenantId:config.tenantId!,discoveryId,senderCurrency:'GBP',senderAmount:'3.17',demoAedRate:'4.70'},
+    staffCatalogue:{available:async()=>true,read:async(_identity,tenant,view,query)=> {
       catalogueReads++;
+      if(view==='discoveries'){
+        assert.equal(tenant,config.tenantId);
+        if(query['discoveryId'])assert.equal(query['discoveryId'],discoveryId);
+        return {revision:'fixture-revision',items:currentDiscovery?[{id:discoveryId}]:[],next:null,previous:null,count:currentDiscovery?1:0};
+      }
       if (replacePricingGrant) positions=positions.map(p=>p.role==='PRICING_EDITOR'?{...p,grantId:randomUUID()}:p);
-      return {revision:'fixture-revision',items:[],next:null};
+      return {revision:'fixture-revision',items:[],next:null,previous:null,count:0};
     }},
     sessions:integration.sessions,departmentAccess:{positions:async()=>positions},staffWorkspace:{
       availableViews:async()=>['departments','roles','settings'],read:async()=>{reads++;return [];},
@@ -130,7 +169,40 @@ test('department login scopes direct reads and writes to the selected live grant
     assert.equal((await call(origin,'/staff-api/catalogue/products','GET',{cookie:activeCookie})).status,200);
     for (const view of ['offers','economics','drafts','publications'])
       assert.equal((await call(origin,'/staff-api/catalogue/'+view,'GET',{cookie:activeCookie})).status,403);
-    assert.equal(catalogueReads,1);
+    const supportDiscoveries=await call(origin,'/staff-api/catalogue/discoveries','GET',{cookie:activeCookie});
+    assert.equal(supportDiscoveries.status,200);
+    assert.equal(JSON.parse(supportDiscoveries.body).items[0].sellingPricePreview,undefined);
+    assert.equal(catalogueReads,2);
+    const manager=await choose('central','TENANT_STAFF_MANAGER');
+    assert.equal(manager.status,204);
+    const managerCookie=cookie+'; '+manager.headers['set-cookie']![0]!.split(';')[0];
+    const previewPath='/staff-api/catalogue/price-preview';
+    const selection={discoveryId};
+    const preview=(cookieValue:string,input:unknown,extra={})=>call(origin,previewPath,'POST',
+      {...headers,cookie:cookieValue,...extra},JSON.stringify(input));
+    assert.equal((await call(origin,previewPath,'POST')).status,401);
+    assert.equal((await preview(activeCookie,selection)).status,403);
+    assert.equal((await preview(managerCookie,selection,{'x-csrf-token':'x'.repeat(43)})).status,403);
+    assert.equal((await preview(managerCookie,{...selection,tenantId:randomUUID()})).status,400);
+    assert.equal((await preview(managerCookie,{...selection,rate:'1e0'})).status,400);
+    assert.equal((await preview(managerCookie,{...selection,senderAmount:'0.01'})).status,400);
+    assert.equal((await preview(managerCookie,{discoveryId:randomUUID()})).status,409);
+    assert.equal((await preview(managerCookie,{...selection,platformFeeAed:'0.00',commissionAed:'0.00'})).status,400);
+    const result=await preview(managerCookie,selection);
+    assert.equal(result.status,200);
+    assert.deepEqual(JSON.parse(result.body),{currency:'AED',basis:'OBSERVED_SENDER_COST_DEMO_FX',senderCurrency:'GBP',
+      senderAmount:'3.17',demoAedRate:'4.70',estimatedCost:'14.90',platformFee:'2.00',commission:'0.50',indicativePrice:'17.40'});
+    const catalogue=await Promise.all(['countries?group=GCC','discovery-providers',
+      'discoveries?provider=FINXPLOR&sourceCountry=GTM&sourceRegion=Americas&productType=Gift+cards'].map(view=>
+      call(origin,'/staff-api/catalogue/'+view,'GET',{cookie:managerCookie,'sec-fetch-site':'same-origin'})));
+    assert.deepEqual(catalogue.map(response=>response.status),[200,200,200]);
+    assert.equal(JSON.parse(catalogue[1]!.body).pricingPreviewAvailable,true);
+    assert.equal(JSON.parse(catalogue[2]!.body).items[0].sellingPricePreview,'17.40');
+    assert.equal(JSON.parse(catalogue[2]!.body).items[0].senderAmount,undefined);
+    currentDiscovery=false;
+    assert.equal((await preview(managerCookie,selection)).status,409);
+    assert.equal((await call(origin,'/staff-api/catalogue/economics','GET',{cookie:managerCookie})).status,403);
+    assert.equal(catalogueReads,7);
     const pricing=await choose('catalogue','PRICING_EDITOR');
     assert.equal(pricing.status,204);
     const pricingCookie=cookie+'; '+pricing.headers['set-cookie']![0]!.split(';')[0];
@@ -143,6 +215,7 @@ test('department login scopes direct reads and writes to the selected live grant
       JSON.stringify({action:'create-department',id:randomUUID(),name:'Forbidden'}))).status,403);
     assert.equal(writes,0);assert.equal(reads,1);
     positions=positions.map(p=>({...p,grantId:randomUUID()}));
+    assert.equal((await preview(managerCookie,selection)).status,403);
     assert.equal((await call(origin,'/staff-api/workspace/settings','GET',{cookie:activeCookie})).status,403);
     assert.equal(JSON.parse((await call(origin,'/auth/workspace','GET',{cookie:activeCookie})).body).departmentAccess.selected,null);
   }finally{await app.close();integration.close();}
@@ -445,7 +518,7 @@ test('catalogue BFF forwards an allowlisted read with verified server session an
       assert.equal(tenant,config.tenantId);
       assert.equal(view,'countries');
       assert.equal(query['group'],'GCC');
-      return {revision:'fixture-v1',items:[{id:'AE',name:'United Arab Emirates'}],next:null};
+      return {revision:'fixture-v1',items:[{id:'AE',name:'United Arab Emirates'}],next:null,previous:null,count:1};
     }},
     staffManagement:{async availableViews(identity,tenant){
       assert.equal(identity.subject,'synthetic-staff');

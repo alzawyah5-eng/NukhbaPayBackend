@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer, type IncomingMessage } from 'node:http';
 import test from 'node:test';
-import { IronGateCatalogue, type IronGateCatalogueOptions } from '../src/index.ts';
+import { IronGateCatalogue, qualifyIronGateCatalogueRead, type IronGateCatalogueOptions } from '../src/index.ts';
 
 const account = { tenantId: '00000000-0000-4000-8000-000000000001', providerAccountId: '00000000-0000-4000-8000-000000000002' };
 const other = '00000000-0000-4000-8000-000000000003';
@@ -116,4 +116,32 @@ test('IronGate rejects wrong success code, currency, repeated IDs and nonnumeric
   status = 503;
   await assert.rejects(client.listPrepaidPrices(account), { code: 'UNAVAILABLE' });
   assert.equal(requests, 5);
+});
+
+test('IronGate game metadata requires success status and typed fields, ignores extra fields and rejects duplicate server IDs', async () => {
+  let response: Record<string, unknown> = {};
+  const client = new IronGateCatalogue({ ...options, gameCode: '0067', successCodes: { gameFormat: fixtureSuccess, gameServers: fixtureSuccess },
+    fetch: async () => Response.json({ data: { rc: fixtureSuccess, status: 1, message: 'Fixture', ...response } }) });
+  await assert.rejects(client.getGameFormat({ ...account, tenantId: other }), { code: 'SCOPE_DENIED' });
+  response = { formatGameId: 'ID then server', rawVendorText: 'ignored' };
+  assert.deepEqual((await client.getGameFormat(account)).data, { format: 'ID then server' });
+  response = { status: 2, formatGameId: 'ID then server' };
+  await assert.rejects(client.getGameFormat(account), { code: 'UNAVAILABLE' });
+  response = { formatGameId: 12 };
+  await assert.rejects(client.getGameFormat(account), { code: 'INVALID_RESPONSE' });
+  const server = { name: 'First', value: '001' };
+  response = { servers: [server, { name: 'Duplicate', value: '001' }] };
+  await assert.rejects(client.listGameServers(account), { code: 'INVALID_RESPONSE' });
+  response = { servers: [{ ...server, url: 'discarded' }] };
+  assert.deepEqual((await client.listGameServers(account)).data, [server]);
+});
+
+test('IronGate game metadata denies a changed game code before credentials or transport', async () => {
+  const config = { account, baseUrl: origin, gameCode: '0067', successCodes: { gameFormat: fixtureSuccess } };
+  const result = await qualifyIronGateCatalogueRead('gameFormat', config, {
+    ...account, environment: 'SANDBOX', provider: 'IRONGATE', origin, credentialReference: 'fixture/game',
+    method: 'POST', path: '/api/game/format', requestBudget: 1, contract: 'irongate/prepaid-v2+postpaid/catalogue',
+    gameCode: '0068', successCode: fixtureSuccess,
+  }, async () => assert.fail('Unexpected credential access'), async () => assert.fail('Unexpected transport'));
+  assert.deepEqual(result, { outcome: 'SCOPE_DENIED', requests: 0 });
 });

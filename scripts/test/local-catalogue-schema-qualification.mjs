@@ -45,6 +45,20 @@ export async function rehearseLocalCatalogueSchema(client) {
     face_value_minor,fulfillment_method,terms_version) VALUES($1,$2,'Qualification','AE','AED',100,'DIGITAL_PIN','test')`, [product, product]);
   await client.query(`INSERT INTO nukhabapay.provider_accounts(id,tenant_id,provider_code,external_account_key,status)
     VALUES($1,$2,'LOCAL_QUALIFICATION',$3,'ACTIVE')`, [account, tenant, account]);
+  const scan = randomUUID(), discovery = randomUUID();
+  await client.query(`INSERT INTO nukhabapay.catalogue_discoveries(id,tenant_id,provider_account_id,source_id,source_digest,
+    product_name,brand,source_country,currency,category,delivery,denominations,min_amount,max_amount)
+    VALUES($1,$2,$3,'qualification','${'a'.repeat(64)}','Qualification','Qualification','BGD','BDT','Mobile recharge','email','["100"]','100','100')`,
+  [discovery, tenant, account]);
+  await client.query(`INSERT INTO nukhabapay.catalogue_discovery_scans(id,tenant_id,provider_account_id)
+    VALUES($1,$2,$3)`, [scan, tenant, account]);
+  const includeDiscovery = id => client.query(`INSERT INTO nukhabapay.catalogue_discovery_scan_items
+    (tenant_id,provider_account_id,scan_id,discovery_id) VALUES($1,$2,$3,$4)`, [tenant, account, scan, id]);
+  await expectDenied('23503', () => includeDiscovery(randomUUID()));
+  await includeDiscovery(discovery);
+  await scope(otherTenant);
+  assert.equal((await client.query('SELECT 1 FROM nukhabapay.catalogue_discovery_scan_items WHERE scan_id=$1', [scan])).rowCount, 0);
+  await scope(tenant);
   await client.query(`INSERT INTO nukhabapay.provider_snapshots(id,tenant_id,provider_account_id,snapshot_key,source_version,
     observed_at,status,row_count,completed_at) VALUES($1,$2,$3,'qualification','v1',$4,'COMPLETE',0,$5)`, [snapshot, tenant, account, started, stamp]);
   await client.query(`INSERT INTO nukhabapay.catalogue_publication_candidates(candidate_id,candidate_digest,tenant_id,product_id,canonical_product_key,

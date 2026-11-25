@@ -127,6 +127,33 @@ test('logout immediately denies concurrent validation and rotation even when per
   assert.equal((await service.revoke(raw)).ok,true);
 });
 
+test('parallel profile reads append validations in timestamp order for the same session',async()=>{
+  const f=fixture(),actor=await f.actor();
+  let entered!:()=>void,resume!:()=>void;
+  const waiting=new Promise<void>(resolve=>{entered=resolve;});
+  const gate=new Promise<void>(resolve=>{resume=resolve;});
+  const times:number[]=[];
+  let latest=0;
+  const service=new StaffSessionLifecycle({actors:f.actors,now:f.now,enabled:true,store:{async execute(ticket){
+    if(ticket.operation==='VALIDATE') {
+      times.push(ticket.nowMs);
+      if(times.length===1){entered();await gate;}
+      if(ticket.nowMs<latest)return 'DENIED';
+      latest=ticket.nowMs;
+    }
+    return f.store.execute(ticket);
+  }}});
+  const raw=(await token(service,actor)).credential.cookieValue();
+  const first=service.readProfile(raw);
+  await waiting;
+  f.advance(10);
+  const second=service.readProfile(raw);
+  await new Promise<void>(resolve=>setImmediate(resolve));
+  resume();
+  assert.ok((await Promise.all([first,second])).every(result=>result.ok));
+  assert.deepEqual(times,[f.now().getTime()-10,f.now().getTime()]);
+});
+
 test('cleanup releases expired bindings while preserving live sessions and durable history',async()=>{
   const f=fixture(),service=f.make(),actor=await f.actor();
   const expired=(await token(service,actor)).credential.cookieValue();f.advance(5000);

@@ -62,6 +62,7 @@ const failure = (reason: "DISABLED" | "DENIED" | "UNAVAILABLE") => Object.freeze
 /** No environment-selected activation, token attester, enrollment, API permission or MFA bypass. */
 export class StaffSessionLifecycle {
   readonly #known = new Map<string, {actor:TrustedStaffActor;binding:SessionBinding;id:string;expiresAtMs:number;invalidated:boolean}>();
+  readonly #validating = new Map<string, Promise<unknown>>();
   readonly #blockedActors = new WeakSet<object>();
   constructor(private readonly dependencies: {
     readonly actors: Pick<TrustedStaffActorBoundary,"inspectSessionActor">; readonly store: StaffSessionStore;
@@ -129,7 +130,18 @@ export class StaffSessionLifecycle {
   async validate(token:string) {
     if(this.dependencies.enabled!==true)return failure("DISABLED");
     if(!validToken(token))return failure("DENIED");
-    const known=this.#known.get(hash(token));if(!known || known.invalidated)return failure("DENIED");
+    const tokenHash=hash(token);
+    const known=this.#known.get(tokenHash);if(!known || known.invalidated)return failure("DENIED");
+    // Allocate each validation timestamp in the same order as the durable
+    // session updates. A newer request must not make an earlier one look stale.
+    const preceding=this.#validating.get(tokenHash)??Promise.resolve();
+    const validation=preceding.then(()=>this.#validate(token,tokenHash));
+    this.#validating.set(tokenHash,validation);
+    try{return await validation;}
+    finally{if(this.#validating.get(tokenHash)===validation)this.#validating.delete(tokenHash);}
+  }
+  async #validate(token:string,tokenHash:string) {
+    const known=this.#known.get(tokenHash);if(!known || known.invalidated)return failure("DENIED");
     if(this.#blockedActors.has(known.actor))return this.#invalidate(token);
     try {
       const evidence=await this.dependencies.actors.inspectSessionActor(known.actor);
@@ -137,7 +149,7 @@ export class StaffSessionLifecycle {
         return this.#invalidate(token);
       }
       const fresh=async()=>{const valid=await evidence.revalidate();return valid && !known.invalidated;};
-      const result=await this.#execute(this.#ticket("VALIDATE",hash(token),known.id,known.binding,known.expiresAtMs,fresh));
+      const result=await this.#execute(this.#ticket("VALIDATE",tokenHash,known.id,known.binding,known.expiresAtMs,fresh));
       if(result!=="ACTIVE")return result==="UNRESOLVED"?failure("UNAVAILABLE"):this.#invalidate(token,!await fresh());
       if(!await fresh())return this.#invalidate(token);
       return Object.freeze({ok:true as const,execution:"NOT_AUTHORIZED" as const,assurance:"not-established" as const});

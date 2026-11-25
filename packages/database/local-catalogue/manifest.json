@@ -56,5 +56,20 @@
     "name": "local_submission_audit_006",
     "file": "006_submission_audit.sql",
     "sha256": "df82170d2fb5f0c25a2290ffd6151f72709927eeb7bf0cf61ab9ad45f2d29446"
+  },
+  {
+    "name": "local_catalogue_discovery_007",
+    "file": "007_catalogue_discovery.sql",
+    "sha256": "b2610418d9827dd838758a6bee787a3edb1d81d961e25fe1c737eeef9841ede1"
+  },
+  {
+    "name": "local_discovery_review_evidence_008",
+    "file": "008_discovery_review_evidence.sql",
+    "sha256": "c5b83596b7cfff0202d09b59c62fc5f8ee23b6740381dc714912ac14473e9a50"
+  },
+  {
+    "name": "local_discovery_scans_009",
+    "file": "009_discovery_scans.sql",
+    "sha256": "a2cdd69a7e2699c3662c45c41ddf3ff341e21b4e740b517f1d0bd996d887ad5d"
   }
 ]

@@ -2,9 +2,12 @@ import { createHash } from 'node:crypto';
 import { readCatalogueJson, wireNumber, withinCatalogueDeadline } from './catalogue-http.ts';
 
 const contract = 'irongate/prepaid-v2+postpaid/catalogue' as const;
-const signatures = Object.freeze({ prepaid: 'pl', postpaid: 'pl', games: 'gc', esimIndonesia: 'esim', esimInternational: 'esim-inter' });
+const signatures = Object.freeze({ prepaid: 'pl', postpaid: 'pl', games: 'gc', gameFormat: null, gameServers: null,
+  esimIndonesia: 'esim', esimInternational: 'esim-inter' });
 type Read = keyof typeof signatures;
 type Currency = 'IDR' | 'USD';
+type PrepaidStatus = 'all' | 'active' | 'non active';
+type PostpaidStatus = 'all' | 'active' | 'non-active';
 type Failure = 'INVALID_CONFIGURATION' | 'SCOPE_DENIED' | 'UNAVAILABLE' | 'INVALID_RESPONSE';
 
 export interface IronGateAccountBinding { readonly tenantId: string; readonly providerAccountId: string }
@@ -14,7 +17,12 @@ export interface IronGateCatalogueOptions {
   /** Supply a confirmed wire success code for each approved operation. Entries also restrict account scope. */
   readonly successCodes: Readonly<Partial<Record<Read, string>>>;
   readonly prepaidCurrency?: Currency;
+  readonly prepaidStatus?: PrepaidStatus;
+  readonly postpaidStatus?: PostpaidStatus;
+  readonly postpaidProvince?: string;
+  readonly gameCode?: string;
   readonly domesticEsimOperator?: string;
+  readonly internationalEsimLanguage?: 'en' | 'id';
   readonly getCredentials: (account: IronGateAccountBinding, signal: AbortSignal) => Promise<{
     readonly username: string;
     readonly apiKey: string;
@@ -63,6 +71,12 @@ function immutableRows<T>(items: readonly T[], sourceId: (item: T) => string): r
   return Object.freeze(items.map(item => Object.freeze(item)));
 }
 
+function requireGameInquirySuccess(data: Record<string, unknown>): void {
+  text(data['message'], 512, true);
+  if (data['status'] === 2) throw new IronGateCatalogueError('UNAVAILABLE');
+  if (data['status'] !== 1) throw invalid();
+}
+
 /** Backend-only catalogue reads. Quoted values stay upstream observations until account semantics are approved. */
 export class IronGateCatalogue {
   readonly #account: IronGateAccountBinding;
@@ -72,6 +86,11 @@ export class IronGateCatalogue {
   readonly #successCodes: Readonly<Partial<Record<Read, string>>>;
   readonly #currency: Currency | undefined;
   readonly #domesticOperator: string | undefined;
+  readonly #prepaidStatus: PrepaidStatus | undefined;
+  readonly #postpaidStatus: PostpaidStatus | undefined;
+  readonly #postpaidProvince: string | undefined;
+  readonly #gameCode: string | undefined;
+  readonly #internationalLanguage: 'en' | 'id' | undefined;
 
   constructor(options: IronGateCatalogueOptions) {
     try {
@@ -83,12 +102,24 @@ export class IronGateCatalogue {
           !codes.length || codes.some(([read, code]) => !Object.hasOwn(signatures, read) || typeof code !== 'string' || !selector.test(code)) ||
           (Object.hasOwn(options.successCodes, 'prepaid') || currency !== undefined) && currency !== 'IDR' && currency !== 'USD' ||
           (Object.hasOwn(options.successCodes, 'esimIndonesia') || operator !== undefined) && (typeof operator !== 'string' || !selector.test(operator)) ||
+          options.prepaidStatus !== undefined && !['all', 'active', 'non active'].includes(options.prepaidStatus) ||
+          options.postpaidStatus !== undefined && !['all', 'active', 'non-active'].includes(options.postpaidStatus) ||
+          options.postpaidProvince !== undefined && (typeof options.postpaidProvince !== 'string' ||
+            !/^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$/.test(options.postpaidProvince) || options.postpaidProvince !== options.postpaidProvince.trim()) ||
+          (options.gameCode !== undefined || codes.some(([read]) => read === 'gameFormat' || read === 'gameServers')) &&
+            (typeof options.gameCode !== 'string' || !selector.test(options.gameCode)) ||
+          options.internationalEsimLanguage !== undefined && !['en', 'id'].includes(options.internationalEsimLanguage) ||
           typeof options.getCredentials !== 'function') throw invalid();
       this.#origin = base.origin;
       this.#account = Object.freeze({ tenantId: options.account.tenantId, providerAccountId: options.account.providerAccountId });
       this.#successCodes = Object.freeze(Object.assign(Object.create(null) as Partial<Record<Read, string>>, Object.fromEntries(codes)));
       this.#currency = currency;
       this.#domesticOperator = operator;
+      this.#prepaidStatus = options.prepaidStatus;
+      this.#postpaidStatus = options.postpaidStatus;
+      this.#postpaidProvince = options.postpaidProvince;
+      this.#gameCode = options.gameCode;
+      this.#internationalLanguage = options.internationalEsimLanguage;
       this.#fetch = options.fetch ?? globalThis.fetch;
       this.#getCredentials = options.getCredentials;
     } catch { throw new IronGateCatalogueError('INVALID_CONFIGURATION'); }
@@ -97,7 +128,9 @@ export class IronGateCatalogue {
   async listPrepaidPrices(account: IronGateAccountBinding, signal?: AbortSignal) {
     const allowedCurrency = this.#currency;
     if (!allowedCurrency) throw new IronGateCatalogueError('SCOPE_DENIED');
-    const data = await this.#read(account, 'prepaid', '/api/pricelist', { currency: allowedCurrency }, signal);
+    const data = await this.#read(account, 'prepaid', '/api/pricelist', {
+      currency: allowedCurrency, ...(this.#prepaidStatus && { status: this.#prepaidStatus }),
+    }, signal);
     const products = rows(data['pricelist']).map(item => {
       const currency = item['currency'];
       if (currency !== allowedCurrency) throw invalid();
@@ -110,7 +143,10 @@ export class IronGateCatalogue {
   }
 
   async listPostpaidPrices(account: IronGateAccountBinding, signal?: AbortSignal) {
-    const data = await this.#read(account, 'postpaid', '/api/v1/bill/check', { commands: 'pricelist-pasca' }, signal);
+    const data = await this.#read(account, 'postpaid', '/api/v1/bill/check', {
+      commands: 'pricelist-pasca', ...(this.#postpaidStatus && { status: this.#postpaidStatus }),
+      ...(this.#postpaidProvince && { province: this.#postpaidProvince }),
+    }, signal);
     const products = rows(data['pasca']).map(item => {
       const status = item['status'];
       if (status !== 1 && status !== 4) throw invalid();
@@ -132,6 +168,19 @@ export class IronGateCatalogue {
     return this.#result(immutableRows(games, item => item.sourceId));
   }
 
+  async getGameFormat(account: IronGateAccountBinding, signal?: AbortSignal) {
+    const data = await this.#read(account, 'gameFormat', '/api/game/format', {}, signal);
+    requireGameInquirySuccess(data);
+    return this.#result(Object.freeze({ format: text(data['formatGameId'], 512) }));
+  }
+
+  async listGameServers(account: IronGateAccountBinding, signal?: AbortSignal) {
+    const data = await this.#read(account, 'gameServers', '/api/inquiry-game-server', {}, signal);
+    requireGameInquirySuccess(data);
+    const servers = rows(data['servers']).map(item => ({ name: text(item['name']), value: text(item['value']) }));
+    return this.#result(immutableRows(servers, item => item.value));
+  }
+
   async getIndonesiaEsimAvailability(account: IronGateAccountBinding, signal?: AbortSignal) {
     const operator = this.#domesticOperator;
     if (!operator) throw new IronGateCatalogueError('SCOPE_DENIED');
@@ -142,7 +191,8 @@ export class IronGateCatalogue {
   }
 
   async listInternationalEsimCoverage(account: IronGateAccountBinding, signal?: AbortSignal) {
-    const data = await this.#read(account, 'esimInternational', '/api/esiminternationallist', {}, signal);
+    const data = await this.#read(account, 'esimInternational', '/api/esiminternationallist',
+      this.#internationalLanguage ? { lang: this.#internationalLanguage } : {}, signal);
     if (typeof data['status'] !== 'number' || !Number.isFinite(data['status'])) throw invalid();
     const coverage = rows(data['list']).map(item => ({ sourceId: text(item['slug']), name: text(item['name']),
       sourceType: text(item['type']), countries: immutableRows(rows(item['countries']).map(country => ({
@@ -155,18 +205,21 @@ export class IronGateCatalogue {
 
   async #read(account: IronGateAccountBinding, read: Read, path: string, params: Record<string, string>, parent?: AbortSignal) {
     const successCode = this.#successCodes[read];
-    if (!successCode || account?.tenantId !== this.#account.tenantId || account.providerAccountId !== this.#account.providerAccountId)
+    const gameInquiry = signatures[read] === null;
+    const suffix = signatures[read] ?? this.#gameCode;
+    if (!successCode || !suffix || account?.tenantId !== this.#account.tenantId || account.providerAccountId !== this.#account.providerAccountId)
       throw new IronGateCatalogueError('SCOPE_DENIED');
     const deadline = AbortSignal.timeout(5000);
     const signal = parent ? AbortSignal.any([parent, deadline]) : deadline;
     try {
       const { username, apiKey } = await withinCatalogueDeadline(() => this.#getCredentials(this.#account, signal), signal);
       if (typeof username !== 'string' || !credential.test(username) || typeof apiKey !== 'string' || !credential.test(apiKey)) throw invalid();
-      const sign = createHash('md5').update(username + apiKey + signatures[read]).digest('hex');
+      const sign = createHash('md5').update(username + apiKey + suffix).digest('hex');
       const url = this.#origin + path;
       const response = await withinCatalogueDeadline(() => this.#fetch(url, { method: 'POST',
         headers: { accept: 'application/json', 'content-type': 'application/json' },
-        body: JSON.stringify({ ...params, username, sign }), signal, redirect: 'error', cache: 'no-store', credentials: 'omit' }), signal);
+        body: JSON.stringify({ ...params, ...(gameInquiry && { game_code: suffix }), username, sign }),
+        signal, redirect: 'error', cache: 'no-store', credentials: 'omit' }), signal);
       if (response.status !== 200 || response.redirected || response.url && response.url !== url) {
         void response.body?.cancel().catch(() => undefined);
         throw new IronGateCatalogueError('UNAVAILABLE');

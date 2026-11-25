@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  authorizeIsolatedCataloguePreview,
   authorizeIsolatedStaffRead,
   authorizeStaffAccess,
   resolveStaffIdentity,
@@ -62,6 +63,24 @@ function context(
     platformRoleGrants,
   };
 }
+
+test("the local catalogue grant is confined to the bound active manager and catalogue reads", () => {
+  const grantScope={staffId,tenantId:tenantA};
+  const request={permissionCode:"catalog.read",scope:"TENANT" as const,tenantId:tenantA,objectTenantId:tenantA,now};
+  const manager=[grant("TENANT_STAFF_MANAGER","TENANT")];
+  assert.equal(authorizeIsolatedCataloguePreview(context(manager),request,grantScope).allowed,true);
+  assert.equal(authorizeStaffAccess(context(manager),request).allowed,false);
+  for (const permissionCode of ["pricing.read","catalog.mapping.approve","pricing.approve","tenant.staff.suspend"]) {
+    assert.equal(authorizeIsolatedCataloguePreview(context(manager),{...request,permissionCode},grantScope).allowed,false);
+  }
+  assert.equal(authorizeIsolatedCataloguePreview(context(manager),request,{...grantScope,staffId:otherStaffId}).allowed,false);
+  assert.equal(authorizeIsolatedCataloguePreview(context(manager),{...request,objectTenantId:tenantB},grantScope).allowed,false);
+  assert.equal(authorizeIsolatedCataloguePreview(context(manager,[],activePrincipal,"SUSPENDED"),request,grantScope).allowed,false);
+  assert.equal(authorizeIsolatedCataloguePreview(context([grant("TENANT_STAFF_VIEWER","TENANT")]),request,grantScope).allowed,false);
+  assert.equal(authorizeIsolatedCataloguePreview(context([grant("TENANT_STAFF_MANAGER","TENANT",{revokedAt:now})]),request,grantScope).allowed,false);
+  assert.deepEqual(authorizeIsolatedCataloguePreview(context([...manager,grant("CATALOG_OPERATOR","TENANT"),grant("CATALOG_REVIEWER","TENANT")]),request,grantScope),
+    {allowed:false,reason:"ROLE_CONFLICT"});
+});
 
 test("the fixed catalogue has explicit scopes and no wildcard or inherited grants", () => {
   assert.equal(ROLE_CATALOG.length, 14);

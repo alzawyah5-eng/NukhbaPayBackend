@@ -22,6 +22,8 @@ export function createStaffAdministration(deps: {
   readonly readers: AdministrationReaders;
   readonly isolatedStaffReadScope?: IsolatedStaffReadScope;
   readonly isolatedWorkspaceTenant?: string;
+  readonly isolatedCataloguePreview?: IsolatedStaffReadScope;
+  readonly configuredDiscoveryProviders?: readonly string[];
   readonly now: () => Date;
 }) {
   const { repository, auditWriter, readers, now } = deps;
@@ -57,7 +59,12 @@ export function createStaffAdministration(deps: {
       }),
     }),
     ...(readers.catalogue && {
-      staffCatalogue: new StaffCatalogueService({ authority, read: readers.catalogue, audit: auditRead, now }),
+      staffCatalogue: new StaffCatalogueService({
+        authority: deps.isolatedCataloguePreview
+          ? createAdministrationAuthority(repository, now, undefined, undefined, deps.isolatedCataloguePreview) : authority,
+        read: readers.catalogue, audit: auditRead, now,
+        ...(deps.configuredDiscoveryProviders && {configuredDiscoveryProviders:deps.configuredDiscoveryProviders}),
+      }),
     }),
   });
 }

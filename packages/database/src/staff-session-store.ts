@@ -27,6 +27,7 @@ export function createWindowsStaffSessionStore(input:StaffSessionStoreInput, tar
 async function openStaffSessionStore(input:StaffSessionStoreInput,mode:'GUARDED'|'DISPOSABLE_EFFECT'|WindowsStaffTarget):
   Promise<StaffSessionStore & {close():Promise<void>;checkWindowsReadiness?:(issuer:string)=>Promise<boolean>}> {
   let pool:Pool|undefined;
+  let readinessPool:Pool|undefined;
   const brokenClients=new WeakSet<PoolClient>();
   try {
     const url=new URL(input.connectionString),max=input.poolMax??2;
@@ -74,6 +75,14 @@ async function openStaffSessionStore(input:StaffSessionStoreInput,mode:'GUARDED'
       (has_table_privilege(current_user,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER,REFERENCES') OR has_any_column_privilege(current_user,c.oid,'SELECT,INSERT,UPDATE,REFERENCES'))) OR
       EXISTS(SELECT 1 FROM pg_proc p WHERE p.pronamespace='nukhbapay_sessions'::regnamespace AND (has_function_privilege(current_user,p.oid,'EXECUTE') OR p.prosecdef)) AS excess`)).rows[0].excess;
     if(excess)throw unavailable();
+    // Session transactions recheck authority while holding a connection. Health
+    // checks need their own connection to make progress when those slots are full.
+    if(typeof mode==='object'){
+      readinessPool=new Pool({connectionString:input.connectionString,max:1,connectionTimeoutMillis:3000,
+        statement_timeout:5000,query_timeout:6000,application_name:'nukhbapay-staff-session-readiness'});
+      readinessPool.on('error',()=>undefined);
+    }
+    const windowsReadinessPool=readinessPool;
     const activePool=pool; let closed=false;
     const scope=(b:SessionBinding)=>b.tenantId??"PLATFORM";
     const matches=(row:Record<string,unknown>,b:SessionBinding)=>row['actor_staff_id']===b.staffId && row['issuer']===b.issuer && row['subject']===b.subject &&
@@ -162,10 +171,12 @@ async function openStaffSessionStore(input:StaffSessionStoreInput,mode:'GUARDED'
       } finally {client.release(discard||brokenClients.has(client));}
     }
     async function checkWindowsReadiness(issuer:string) {
-      if(closed || typeof mode!=='object')return false;
+      if(closed || typeof mode!=='object' || !windowsReadinessPool)return false;
+      let client:PoolClient|undefined, discard=false;
       try {
-        await verifyWindowsStaffConnection(activePool,mode,windowsSessionRole);
-        const result=await activePool.query(`SELECT count(*)=2 AND bool_and(relrowsecurity AND relforcerowsecurity
+        client=await windowsReadinessPool.connect();
+        await verifyWindowsStaffConnection(client,mode,windowsSessionRole);
+        const result=await client.query(`SELECT count(*)=2 AND bool_and(relrowsecurity AND relforcerowsecurity
             AND pg_get_userbyid(relowner)='nukhabapay_migrator' AND NOT has_table_privilege(current_user,oid,'MAINTAIN'))
           AND EXISTS(SELECT FROM pg_catalog.pg_constraint k WHERE k.conrelid='nukhbapay_sessions.sessions'::regclass
             AND k.contype='c' AND k.convalidated AND k.conenforced
@@ -174,10 +185,11 @@ async function openStaffSessionStore(input:StaffSessionStoreInput,mode:'GUARDED'
             ('nukhbapay_sessions.sessions'::regclass,'nukhbapay_sessions.events'::regclass) AND (NOT k.convalidated OR NOT k.conenforced))
           AS protected FROM pg_catalog.pg_class WHERE oid IN
           ('nukhbapay_sessions.sessions'::regclass,'nukhbapay_sessions.events'::regclass)`,[issuer]);
-        return result.rows[0]?.protected===true;
-      } catch {return false;}
+        return !closed && result.rows[0]?.protected===true;
+      } catch {discard=true;return false;}
+      finally {client?.release(discard);}
     }
     return Object.freeze({execute,history,...(typeof mode==='object' && {checkWindowsReadiness}),
-      close:async()=>{if(!closed){closed=true;await activePool.end();}}});
-  } catch {await pool?.end().catch(()=>undefined);throw unavailable();}
+      close:async()=>{if(!closed){closed=true;await Promise.all([activePool.end(),windowsReadinessPool?.end()]);}}});
+  } catch {await Promise.allSettled([pool?.end(),readinessPool?.end()]);throw unavailable();}
 }

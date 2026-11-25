@@ -16,7 +16,8 @@ const permissions:Readonly<Record<string,string>>={
 
 const privateCatalogueViews: ReadonlySet<StaffCatalogueView> = new Set(['offers', 'economics', 'drafts', 'publications']);
 
-export function positionAllowsCatalogue(position:DepartmentPosition|undefined, view:StaffCatalogueView):boolean {
+export function positionAllowsCatalogue(position:DepartmentPosition|undefined, view:StaffCatalogueView, localPreview=false):boolean {
+  if (localPreview && position?.role==='TENANT_STAFF_MANAGER' && !privateCatalogueViews.has(view)) return true;
   if (!positionAllows(position, '/catalogue')) return false;
   return !privateCatalogueViews.has(view) || ROLE_CATALOG.some(role =>
     role.scope === 'TENANT' && role.code === position?.role && role.permissions.some(code => code === 'pricing.read'));

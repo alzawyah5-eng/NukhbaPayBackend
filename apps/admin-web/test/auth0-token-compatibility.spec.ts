@@ -108,6 +108,24 @@ test("valid lifetime boundaries retain exact client binding and bound session ex
   }
 });
 
+test('local 10-minute sign-in requires signed coverage and respects shorter credential expiry',async()=>{
+  const settings={...approved,localSessionLifetimeSeconds:600 as const};
+  assert.throws(()=>validateAuth0Configuration({...config,...settings,tenantId:null}));
+  for(const duration of [300,600]){
+    const f=await fixture(config.callbackUrl,settings),s=f.begin();
+    f.access({exp:now+duration});f.id({exp:now+3600});f.tokens({expires_in:duration});
+    const token=await f.login.complete(s.callback,s.cookie);
+    f.advance(duration*1000-1000);assert.equal((await f.sessions.readProfile(token)).ok,true);
+    f.advance(1000);assert.equal((await f.sessions.readProfile(token)).ok,false);
+  }
+  for(const excessive of ['response','access'] as const){
+    const f=await fixture(config.callbackUrl,settings),s=f.begin();
+    f.access({exp:now+(excessive==='access'?601:600)});
+    f.tokens({expires_in:excessive==='response'?601:600});
+    await assert.rejects(()=>f.login.complete(s.callback,s.cookie));assert.equal(f.rows.size,0);
+  }
+});
+
 test("fresh auth_time must also be at or after this login transaction", async () => {
   const f = await fixture(config.callbackUrl, approved); f.advance(10000); const s = f.begin();
   f.access({ aud: [config.audience, userinfo] }); f.id({ auth_time: now + 9 });

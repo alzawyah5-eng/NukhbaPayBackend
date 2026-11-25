@@ -264,6 +264,19 @@ export function authorizeIsolatedTenantWorkspace(
   return evaluateStaffAccess(context, request, ["TENANT_STAFF_VIEWER", "TENANT_STAFF_MANAGER"]);
 }
 
+/** The local catalogue preview delegates a single read permission to a bound staff manager. */
+export function authorizeIsolatedCataloguePreview(
+  context: StaffAuthorizationContext,
+  request: StaffAuthorizationRequest,
+  scope: IsolatedStaffReadScope,
+): StaffAuthorizationDecision {
+  if (request.scope !== "TENANT" || request.permissionCode !== "catalog.read" ||
+      request.tenantId !== scope.tenantId || context.principal?.staffId !== scope.staffId) {
+    return deny("SCOPE_MISMATCH");
+  }
+  return evaluateStaffAccess(context, { ...request, permissionCode: "tenant.staff.read" }, ["TENANT_STAFF_MANAGER"]);
+}
+
 export function activeTenantRoleCodes(context: ResolvedStaffTenantContext, now: number): readonly string[] {
   const membership=context.membership;
   if (!membership || membership.status!=="ACTIVE") return [];

@@ -1,4 +1,12 @@
 export { SYNTHETIC_PRODUCT, SYNTHETIC_NOW, SyntheticCatalogProvider, createSyntheticProviders } from "./mock-provider.ts";
 export { SslWirelessCatalogue, SslWirelessCatalogueError, type SslWirelessAccountBinding, type SslWirelessCatalogueOptions } from "./ssl-wireless-catalogue.ts";
+export { SslWirelessBills, SslWirelessBillError, type SslBillBinding, type SslWirelessBillsOptions } from "./ssl-wireless-bills.ts";
 export { IronGateCatalogue, IronGateCatalogueError, type IronGateAccountBinding, type IronGateCatalogueOptions } from "./irongate-catalogue.ts";
+export { IronGatePrepaid, type IronGatePrepaidOptions } from "./irongate-prepaid.ts";
+export { IronGatePostpaid, type IronGatePostpaidOptions } from "./irongate-postpaid.ts";
+export { IronGateTransactionError, type IronGateTransactionOptions } from "./irongate-transaction-http.ts";
+export { checkIronGateCallback } from "./irongate-callback.ts";
+export { createIronGatePrepaidReceiptReader } from "./irongate-prepaid-receipt.ts";
+export { createIronGatePostpaidReceiptReader } from "./irongate-postpaid-receipt.ts";
 export { qualifySslCatalogueRead, qualifyIronGateCatalogueRead } from "./sandbox-catalogue-qualification.ts";
+export { FinxplorCatalogue, type FinxplorAccount, type FinxplorProduct } from "./finxplor-catalogue.ts";

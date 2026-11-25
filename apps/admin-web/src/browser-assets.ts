@@ -1,4 +1,4 @@
-import { lstatSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 export interface BrowserAsset { readonly body: Buffer; readonly type: string; readonly previewOnly?: boolean }
@@ -45,6 +45,12 @@ export function loadBrowserAssets(directory: string): BrowserAssets {
   }
   add('/index.html', 'index.html', 'text/html');
   add('/nukhbapay-original-logo-reference.png', 'nukhbapay-original-logo-reference.png', 'image/png');
+  if (existsSync(join(directory, 'catalogue-country-flags.png'))) {
+    add('/catalogue-country-flags.png', 'catalogue-country-flags.png', 'image/png');
+  }
+  if (existsSync(join(directory, 'catalogue-brand-logos.png'))) {
+    add('/catalogue-brand-logos.png', 'catalogue-brand-logos.png', 'image/png');
+  }
   if (!lstatSync(join(directory, 'assets')).isDirectory() || lstatSync(join(directory, 'assets')).isSymbolicLink()) throw new Error('Invalid staff UI build');
   for (const file of readdirSync(join(directory, 'assets'))) {
     if (!/^[A-Za-z0-9_-]+\.(?:js|css)$/.test(file)) throw new Error('Unexpected staff UI asset');

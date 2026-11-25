@@ -2,7 +2,7 @@ import { IronGateCatalogue, type IronGateCatalogueOptions } from './irongate-cat
 import { SslWirelessCatalogue, type SslWirelessCatalogueOptions } from './ssl-wireless-catalogue.ts';
 
 type SslRead = 'service-list' | 'package-list';
-type IronGateRead = 'prepaid' | 'postpaid' | 'games' | 'esimIndonesia' | 'esimInternational';
+type IronGateRead = keyof IronGateCatalogueOptions['successCodes'];
 type Approval = Readonly<{
   environment: 'SANDBOX'; provider: 'SSL_WIRELESS' | 'IRONGATE'; origin: string;
   tenantId: string; providerAccountId: string; credentialReference: string;
@@ -11,7 +11,8 @@ type Approval = Readonly<{
 type SslApproval = Approval & Readonly<{ provider:'SSL_WIRELESS'; contract:SslWirelessCatalogueOptions['contract']; country:'BD';
   categories:readonly string[]; operators?:readonly string[]; subChannelId?:string }>;
 type IronGateApproval = Approval & Readonly<{ provider:'IRONGATE'; contract:'irongate/prepaid-v2+postpaid/catalogue';
-  successCode:string; prepaidCurrency?:IronGateCatalogueOptions['prepaidCurrency']; domesticEsimOperator?:string }>;
+  successCode:string }> & Readonly<Pick<IronGateCatalogueOptions,
+    'prepaidCurrency'|'prepaidStatus'|'postpaidStatus'|'postpaidProvince'|'gameCode'|'domesticEsimOperator'|'internationalEsimLanguage'>>;
 type Result = Readonly<{ outcome: 'SCHEMA_ACCEPTED'; records: number; requests: number } |
   { outcome: 'SCOPE_DENIED' | 'READ_FAILED'; requests: number }>;
 type Account = Readonly<{ tenantId: string; providerAccountId: string }>;
@@ -72,11 +73,15 @@ export async function qualifyIronGateCatalogueRead(operation: IronGateRead,
   let scope: ReturnType<typeof authorize> | undefined;
   try {
     const paths={prepaid:'/api/pricelist',postpaid:'/api/v1/bill/check',games:'/api/gamelist',
+      gameFormat:'/api/game/format',gameServers:'/api/inquiry-game-server',
       esimIndonesia:`/api/esimlist/${config.domesticEsimOperator}`,esimInternational:'/api/esiminternationallist'};
     if (!Object.hasOwn(paths,operation) || approval.contract!=='irongate/prepaid-v2+postpaid/catalogue' ||
         !approval.successCode || approval.successCode!==config.successCodes[operation] ||
-        (operation==='prepaid' && approval.prepaidCurrency!==config.prepaidCurrency) ||
-        (operation==='esimIndonesia' && approval.domesticEsimOperator!==config.domesticEsimOperator))
+        (operation==='prepaid' && (approval.prepaidCurrency!==config.prepaidCurrency || approval.prepaidStatus!==config.prepaidStatus)) ||
+        (operation==='postpaid' && (approval.postpaidStatus!==config.postpaidStatus || approval.postpaidProvince!==config.postpaidProvince)) ||
+        ((operation==='gameFormat' || operation==='gameServers') && (!approval.gameCode || approval.gameCode!==config.gameCode)) ||
+        (operation==='esimIndonesia' && approval.domesticEsimOperator!==config.domesticEsimOperator) ||
+        (operation==='esimInternational' && approval.internationalEsimLanguage!==config.internationalEsimLanguage))
       return Object.freeze({outcome:'SCOPE_DENIED',requests:0});
     const allowed=authorize(approval,'IRONGATE',config.baseUrl,config.account,'POST',paths[operation],transport);
     scope=allowed;
@@ -86,6 +91,8 @@ export async function qualifyIronGateCatalogueRead(operation: IronGateRead,
       prepaid:async()=>(await adapter.listPrepaidPrices(config.account,signal)).data.length,
       postpaid:async()=>(await adapter.listPostpaidPrices(config.account,signal)).data.length,
       games:async()=>(await adapter.listGameCodes(config.account,signal)).data.length,
+      gameFormat:async()=>{ await adapter.getGameFormat(config.account,signal); return 1; },
+      gameServers:async()=>(await adapter.listGameServers(config.account,signal)).data.length,
       esimIndonesia:async()=>(await adapter.getIndonesiaEsimAvailability(config.account,signal)).data.observedCount,
       esimInternational:async()=>(await adapter.listInternationalEsimCoverage(config.account,signal)).data.length,
     };

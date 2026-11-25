@@ -61,6 +61,7 @@ node('auth0-tools',['--test',...readdirSync(path.join(root,'scripts/test')).filt
 node('browser-boundary',['--test','scripts/test/browser-boundary.test.mjs']);
 node('frozen-migrations',['scripts/rehearse-reviewed-migrations.mjs','--verify-only']);
 node('local-catalogue-startup',['--test','scripts/test/local-catalogue-startup.test.mjs']);
+node('provider-sandbox-config',['--test','scripts/test/provider-sandbox.test.mjs']);
 node('activation-source-only',['--test','scripts/test/persistent-development-iam.test.mjs','scripts/test/persistent-activation-preparation.test.mjs']);
 run('python-ai',python??'python',['-m','unittest','discover','-s','apps/ai-service/tests','-v']);
 run('structure',python??'python',['scripts/check_structure.py']);

@@ -9,7 +9,7 @@ import { createPlatformStaffCommandAdmission, type PlatformStaffPilotPort } from
 import { browserAsset, developmentPreviewEnabled, type BrowserAssets } from './browser-assets.js';
 import { validateDevelopmentCertificate, probeDevelopmentHttps } from './development-tls.js';
 import { departmentCookie, positionAllows, positionAllowsCatalogue, positionProof, workspaceViewPage } from './department-access.js';
-import { parseStaffWorkspaceCommand } from '@nukhbapay/application';
+import { calculateAedPricePreview, parseStaffWorkspaceCommand, type LocalPricePreviewBasis } from '@nukhbapay/application';
 
 export const PORTAL_COOKIE_NAME="__Host-nukhbapay_staff";
 export interface InternalSessionPort {
@@ -59,6 +59,8 @@ export async function createStaffPortal(options:{
   readonly staffWorkspace?: Pick<StaffWorkspaceService,"availableViews"|"read"|"command">;
   readonly departmentAccess?: Pick<StaffWorkspaceService,'positions'>;
   readonly windowsStaffStorageReady?: () => Promise<boolean>;
+  readonly localCataloguePreview?: boolean;
+  readonly localPricePreview?: LocalPricePreviewBasis & {readonly tenantId:string;readonly discoveryId:string};
   readonly staffSuspension?: StaffSuspensionPort;
   readonly staffPublication?: StaffPublicationPort;
   readonly platformStaffPilot?: PlatformStaffPilotPort;
@@ -71,6 +73,9 @@ export async function createStaffPortal(options:{
   const workspaceService=options.staffWorkspace;
   const departmentAccess=options.departmentAccess;
   if(options.windowsStaffStorageReady && (!departmentAccess || !options.login || !options.sessions || previewEnabled))throw unavailable();
+  if(options.localCataloguePreview && (!options.windowsStaffStorageReady || !options.staffCatalogue?.available ||
+      !departmentAccess || environment['NODE_ENV']!=='development' || previewEnabled))throw unavailable();
+  if(options.localPricePreview && !options.localCataloguePreview)throw unavailable();
   if(departmentAccess && (!workspaceService || !options.login || options.staffPublication ||
     options.staffSuspension || options.platformStaffPilot))throw unavailable();
   if(workspaceService && (!options.login || options.login.platformScope || !options.sessions ||
@@ -131,7 +136,8 @@ export async function createStaffPortal(options:{
         if(req.method==='GET' && req.url==='/auth/login' && options.login) {
           const presented=sessionCookie(req);
           let previous=presented;
-          if(presented) {
+          if(presented && !options.login.hasLocalSessionIdentity(presented)) previous=undefined;
+          else if(presented) {
             const current=await options.sessions!.validate(presented);
             if(!current.ok) {
               if(current.reason!=='DENIED') {send(res,503,'{"error":"Staff sign-in unavailable"}');return;}
@@ -177,8 +183,16 @@ export async function createStaffPortal(options:{
           const workspace=req.url==='/auth/workspace';
           if(!options.sessions?.readProfile){send(res,503,'{"error":"Staff profile unavailable"}');return;}
           const token=sessionCookie(req);if(!token){send(res,401,'{"error":"Authentication required"}');return;}
+          const clearSession=()=>res.setHeader('Set-Cookie',[staffCookie('',true),
+            departmentCookie+'=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0']);
+          if(options.login && !options.login.hasLocalSessionIdentity(token)){
+            clearSession();send(res,401,'{"error":"Sign in again"}');return;
+          }
           const result=await options.sessions.readProfile(token);
-          if(!result.ok){send(res,result.reason==='UNAVAILABLE'?503:401,'{"error":"Staff profile unavailable"}');return;}
+          if(!result.ok){
+            if(result.reason!=='UNAVAILABLE')clearSession();
+            send(res,result.reason==='UNAVAILABLE'?503:401,'{"error":"Staff profile unavailable"}');return;
+          }
           const profile=result.profile,uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
           if(!profile || !uuid.test(profile.staffId) || profile.tenantId!==null&&!uuid.test(profile.tenantId) ||
             !Number.isSafeInteger(profile.expiresAtMs)||profile.expiresAtMs<1)throw unavailable();
@@ -207,16 +221,61 @@ export async function createStaffPortal(options:{
           const positions=departmentAccess ? await positionsFor(token):undefined;
           const selected=positions?.find(row=>positionProof(csrfKey,token,row)===sessionCookie(req,departmentCookie));
           send(res,200,JSON.stringify({staffId:profile.staffId,tenantId:profile.tenantId,expiresAtMs:profile.expiresAtMs,
-            navigation:positions ? navigation.filter(path=>path==='/overview'||positionAllows(selected,path)):navigation,
+            navigation:positions ? navigation.filter(path=>path==='/overview'||(path==='/catalogue'
+              ? positionAllowsCatalogue(selected,'discoveries',options.localCataloguePreview) : positionAllows(selected,path))):navigation,
             ...(workspace && positions && {departmentAccess:{positions:positions.map(({department,role})=>({department,role})),
               selected:selected?{department:selected.department,role:selected.role}:null}}),
             ...(workspace && {csrfToken:csrf(token)})}));return;
+        }
+        if(req.method==='POST' && options.localCataloguePreview && req.url==='/staff-api/catalogue/price-preview') {
+          const token=sessionCookie(req), proof=req.headersDistinct['x-csrf-token'];
+          if(!token){send(res,401,'{"error":"Authentication required"}');return;}
+          if(req.headersDistinct['authorization'] || req.headersDistinct['origin']?.length!==1 || req.headers.origin!==origin ||
+             proof?.length!==1 || !tokenPattern.test(proof[0]!) ||
+             !timingSafeEqual(Buffer.from(proof[0]!),Buffer.from(csrf(token))) ||
+             req.headersDistinct['content-type']?.length!==1 || req.headers['content-type']!=='application/json') {
+            send(res,403,'{"error":"Request denied"}');return;
+          }
+          try {
+            if((await selectedPosition(token))?.role!=='TENANT_STAFF_MANAGER') {
+              send(res,403,'{"error":"Request denied"}');return;
+            }
+            const chunks:Buffer[]=[];let size=0;
+            for await(const chunk of req) {
+              const bytes=Buffer.from(chunk);
+              size+=bytes.length;
+              if(size>1024){send(res,413,'{"error":"Request too large"}');return;}
+              chunks.push(bytes);
+            }
+            let input;
+            try {input=JSON.parse(Buffer.concat(chunks).toString('utf8'));}
+            catch {send(res,400,'{"error":"Invalid preview request"}');return;}
+            if(!input || typeof input!=='object' || Array.isArray(input) ||
+               Object.keys(input).join(',')!=='discoveryId' ||
+               typeof input.discoveryId!=='string' || !administrationUuid.test(input.discoveryId)) {
+              send(res,400,'{"error":"Invalid preview request"}');return;
+            }
+            const cost=options.localPricePreview;
+            const available=await options.login!.readForSession(token,async (identity,tenantId)=>{
+              if(!cost || cost.tenantId!==tenantId || cost.discoveryId!==input.discoveryId)return false;
+              const page=await options.staffCatalogue!.read(identity,tenantId,'discoveries',{discoveryId:input.discoveryId,limit:'1'});
+              return page.count===1&&page.items.length===1&&page.items[0]?.id===cost.discoveryId;
+            });
+            if((await selectedPosition(token))?.role!=='TENANT_STAFF_MANAGER') {
+              send(res,403,'{"error":"Request denied"}');return;
+            }
+            if(!available || !cost){send(res,409,'{"error":"Provider cost is unavailable for this product"}');return;}
+            send(res,200,JSON.stringify(calculateAedPricePreview(cost)));
+          } catch {
+            send(res,403,'{"error":"Price preview unavailable"}');
+          }
+          return;
         }
         if(req.method==='GET' && options.login && options.staffCatalogue && req.url?.startsWith('/staff-api/catalogue/')) {
           const token = sessionCookie(req);
           if (!token) {send(res,401,'{"error":"Authentication required"}');return;}
           const url = new URL(req.url,origin);
-          const view = /^\/staff-api\/catalogue\/(countries|services|providers|products|offers|economics|drafts|publications|imports)$/
+          const view = /^\/staff-api\/catalogue\/(countries|services|providers|products|offers|economics|drafts|publications|imports|discoveries|discovery-providers)$/
             .exec(url.pathname)?.[1] as StaffCatalogueView | undefined;
           if (!view || req.url.length>2048 || url.origin!==origin || url.pathname!==req.url.split('?')[0] ||
               url.hash || req.headersDistinct['authorization']) {
@@ -224,21 +283,33 @@ export async function createStaffPortal(options:{
           }
           const query:Record<string,string> = Object.create(null) as Record<string,string>;
           for (const [name,value] of url.searchParams) {
-            if (Object.hasOwn(query,name) || !['country','group','service','provider','product','search','sort','limit','cursor'].includes(name)) {
+            if (Object.hasOwn(query,name) || !['country','group','service','provider','product','search','sort','limit','cursor','sourceCountry','sourceRegion','productType'].includes(name)) {
               send(res,400,'{"error":"Invalid request"}');return;
             }
             query[name]=value;
           }
           try {
-            if (departmentAccess && !positionAllowsCatalogue(await selectedPosition(token), view)) {
+            if (departmentAccess && !positionAllowsCatalogue(await selectedPosition(token), view, options.localCataloguePreview)) {
               send(res,403,'{"error":"Catalogue unavailable"}');return;
             }
-            const data = await options.login.readForSession(token,(identity,tenantId)=>
-              options.staffCatalogue!.read(identity,tenantId,view,query));
-            if (departmentAccess && !positionAllowsCatalogue(await selectedPosition(token), view)) {
+            const cost=options.localPricePreview;
+            const {data,price}=await options.login.readForSession(token,async (identity,tenantId)=>{
+              const data=await options.staffCatalogue!.read(identity,tenantId,view,query);
+              const price=view==='discoveries' && cost?.tenantId===tenantId &&
+                data.items.some(item=>item.id===cost.discoveryId) ? calculateAedPricePreview(cost) : undefined;
+              return {data,price};
+            });
+            const positionAfterRead=departmentAccess ? await selectedPosition(token) : undefined;
+            if (departmentAccess && !positionAllowsCatalogue(positionAfterRead, view, options.localCataloguePreview)) {
               send(res,403,'{"error":"Catalogue unavailable"}');return;
             }
-            send(res,200,JSON.stringify(data));
+            const previewCapability=view==='discovery-providers' && options.localCataloguePreview && positionAfterRead?.role==='TENANT_STAFF_MANAGER';
+            if(price && cost && positionAfterRead?.role==='TENANT_STAFF_MANAGER') {
+              const items=data.items.map(item=>item.id===cost.discoveryId?{...item,sellingPricePreview:price.indicativePrice}:item);
+              send(res,200,JSON.stringify({...data,items}));
+            } else {
+              send(res,200,JSON.stringify(previewCapability?{...data,pricingPreviewAvailable:true}:data));
+            }
           } catch (error) {
             send(res,error instanceof AdministrationError ? error.status : 403,'{"error":"Catalogue unavailable"}');
           }
@@ -410,15 +481,15 @@ export async function createStaffPortal(options:{
           return;
         }
         if(callback) {
-          res.setHeader('Set-Cookie',transactionCookie('',true));
+          const rawTransaction=sessionCookie(req,TRANSACTION_COOKIE_NAME), existing=sessionCookie(req);
           try {
-            const rawTransaction=sessionCookie(req,TRANSACTION_COOKIE_NAME), existing=sessionCookie(req);
             const result=platformCommands ? await platformCommands.callback(req.url!,rawTransaction,existing) :
               commands ? await commands.callback(req.url!,rawTransaction,existing) :
               {token:await options.login!.complete(req.url!,rawTransaction,existing),redirect:'/'};
             res.setHeader('Set-Cookie',[transactionCookie('',true),staffCookie(result.token)]);
             res.writeHead(303,{location:result.redirect});res.end();
           }catch{
+            if(!options.login!.hasPendingLogin(rawTransaction))res.setHeader('Set-Cookie',transactionCookie('',true));
             if(documentNavigation && options.browserAssets){res.writeHead(303,{location:signInFailed});res.end();}
             else send(res,401,'{"error":"Staff authentication failed"}');
           }

@@ -12,7 +12,7 @@ import { loadBrowserAssets, browserAsset } from '../../apps/admin-web/dist/brows
 const executable=process.env.NUKHBA_TEST_BROWSER ??
   'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 assert.ok(path.isAbsolute(executable),'Use the absolute path of an installed Chromium-compatible browser');
-const key='a'.repeat(43), cursor='b'.repeat(64);
+const key='a'.repeat(43), cursor='b'.repeat(64), previousCursor='c'.repeat(64);
 const actor='00000000-0000-4000-8000-000000000001',tenant='00000000-0000-4000-8000-000000000002';
 const requestId='00000000-0000-4000-8000-000000000003';
 
@@ -34,10 +34,10 @@ test('existing React workspace completes catalogue loading and protected command
   const profileRoot=await realpath(tmpdir());
   const profile=await mkdtemp(path.join(profileRoot,'staff-browser-final-'));
   const received=[];
-  const groupQueries=new Set();
   const fixtureRequests=new Set();
-  let command='STEP_UP_REQUIRED',reviewDecision,expired=false,privatePrice='permitted',releaseCountries,publicationAction;
-  let loginEnabled=false,staffEnabled=true;
+  let command='STEP_UP_REQUIRED',reviewDecision,expired=false,privatePrice='permitted',publicationAction;
+  let loginEnabled=false,staffEnabled=true,configuredCatalogue=false;
+  let discoveryPaginationExpired=false;
   const server=createServer((req,res)=>{
     const url=new URL(req.url,'http://127.0.0.1');
     fixtureRequests.add(url.pathname);
@@ -54,28 +54,69 @@ test('existing React workspace completes catalogue loading and protected command
     }
     if (url.pathname.startsWith('/staff-api/catalogue/')) {
       const view=url.pathname.split('/').pop();
-      const page=(items=[],next=null)=>reply(200,{revision:'browser-v1',items,next});
+      if (view==='price-preview' && req.method==='POST') {
+        let body='';
+        req.on('data',chunk=>{body+=chunk;});
+        req.on('end',()=>{
+          assert.equal(req.headers['x-csrf-token'],key);
+          assert.deepEqual(JSON.parse(body),{discoveryId:'sandbox-discovery'});
+          reply(200,{currency:'AED',basis:'OBSERVED_SENDER_COST_DEMO_FX',senderCurrency:'GBP',
+            senderAmount:'3.17',demoAedRate:'4.70',estimatedCost:'14.90',platformFee:'2.00',commission:'0.50',indicativePrice:'17.40'});
+        });
+        return;
+      }
+      const page=(items=[],next=null,previous=null,count=items.length,extra={})=>reply(200,{revision:'browser-v1',items,next,previous,count,...extra});
+      if(view==='discovery-providers'){
+        page([{id:'FINXPLOR',name:'Finxplor',hasDiscoveries:true,functions:[
+          {name:'List products',method:'GET',path:'/api/v1/products',verification:'Sandbox imported'},
+          {name:'Get product details',method:'GET',path:'/api/v1/products/:productId',verification:'Mock verified'},
+        ]},{id:'IPAY',name:'iPay / Qore3',hasDiscoveries:false}],null,null,2,
+        {hasConfiguredServices:configuredCatalogue,pricingPreviewAvailable:true});return;
+      }
+      if (view==='discoveries') {
+        assert.ok(url.searchParams.has('provider'));
+        if(url.searchParams.get('provider')!=='FINXPLOR'){page([],null,null,0,{sourceMarkets:[],productTypes:[]});return;}
+        const extra={sourceMarkets:[{id:'GTM',name:'Guatemala',region:'Americas'},
+          {id:'ARE',name:'United Arab Emirates',region:'GCC'}],productTypes:['Gift cards','Mobile recharge']};
+        const item={id:'sandbox-discovery',name:'Sandbox discovery fixture',providerId:'FINXPLOR',brand:'Airtel Bangladesh',
+          sourceCountry:'GTM',category:'Gift Card',delivery:'email',minAmount:'0.00',maxAmount:'25.00',currency:'USD',
+          sourceCountryName:'Guatemala',sourceCountryCode:'GT',sourceRegion:'Americas',productType:'Gift cards',
+          mappingBlockers:['SERVICE_COUNTRY','CURRENCY'],
+          pricingReview:{matching:'OUTSIDE_SCOPE',state:'AWAITING_VERIFIED_TERMS',salePrice:null},
+          observedAt:'2026-11-20T17:00:00Z',reviewReason:'OUTSIDE_PRICED_CATALOGUE_SCOPE'};
+        const last={...item,id:'sandbox-discovery-next',name:'Second provider page',sourceCountry:'ARE',
+          sourceCountryName:'United Arab Emirates',sourceCountryCode:'AE',sourceRegion:'GCC',productType:'Mobile recharge'};
+        if (url.searchParams.get('search')==='no-fixture') {page([],null,null,0,extra);return;}
+        if (url.searchParams.get('productType')==='Mobile recharge' || url.searchParams.get('sourceCountry')==='ARE' ||
+            url.searchParams.get('sourceRegion')==='GCC') {page([last],null,null,1,extra);return;}
+        if (url.searchParams.get('cursor')===cursor) {
+          if(discoveryPaginationExpired){reply(409,{error:'Catalogue unavailable'});return;}
+          page([last],null,previousCursor,21,extra);return;
+        }
+        const limit=Number(url.searchParams.get('limit'));
+        const rows=[{...item,sellingPricePreview:'17.40'},...Array.from({length:19},(_,n)=>({...item,id:'discovery-'+n,name:'Additional product '+n})),last];
+        page(rows.slice(0,limit),limit<rows.length?cursor:null,null,rows.length,extra);return;
+      }
       if (view==='countries') {
-        groupQueries.add(url.searchParams.get('group'));
-        if(url.searchParams.get('group')==='EUROPE') {page([{id:'DE',name:'Germany',configured:false}]);return;}
-        const replyCountries=()=>page([{id:'AE',name:'United Arab Emirates',configured:true}]);
-        if (releaseCountries===undefined) releaseCountries=replyCountries;
-        else replyCountries();
+        assert.equal(url.searchParams.has('group'),false);
+        page([{id:'AE',name:'United Arab Emirates',group:'GCC',configured:configuredCatalogue},
+          {id:'DE',name:'Germany',group:'EUROPE',configured:false}]);
         return;
       }
       if (view==='services') {page([{id:'DIGITAL_PIN',name:'Digital PIN'}]);return;}
       if (view==='providers') {page([{id:'provider-fixture',name:'Fixture provider'}]);return;}
       if (view==='products') {
         if (url.searchParams.get('search')==='none') {page([]);return;}
-        if (url.searchParams.get('cursor')===cursor) {page([{id:'2',name:'Second product'}]);return;}
-        page([{id:'1',name:'First product'}],cursor);return;
+        if (url.searchParams.get('cursor')===cursor) {page([{id:'2',name:'Second product'}],null,previousCursor,21);return;}
+        page([{id:'1',name:'First product'}],cursor,null,21);return;
       }
       if (view==='offers') {page([{id:'offer',providerId:'Fixture provider',available:true,validUntil:'2026-11-20T18:00:00Z',
         freshness:'CURRENT',sourceObservedAt:'2026-11-20T17:00:00Z',sourceCompletedAt:'2026-11-20T17:01:00Z',
         ...(privatePrice==='permitted'&&{providerCost:'96.00'})}]);return;}
       if (view==='economics') {
         if (privatePrice==='denied') {reply(403,{state:'FORBIDDEN'});return;}
-        page([{id:'economics',name:'First product',total:'102.00',providerCost:'96.00',margin:'4.00'}]);return;
+        page([{id:'economics',name:'First product',total:'102.00',providerCost:'96.00',
+          serviceFee:'2.00',paymentFee:'1.50',commission:'0.50',margin:'4.00',status:'DRAFT'}]);return;
       }
       if (view==='publications') {page([{id:'publication',revision:'3',action:'ROLLBACK',occurredAt:'2026-11-20T17:00:00Z'}]);return;}
       page([{id:'draft',version:1,status:'DRAFT'}]);return;
@@ -172,9 +213,9 @@ test('existing React workspace completes catalogue loading and protected command
       return result.result.value;
     }
     const visible=(text)=>until(()=>run(`document.body.textContent.includes(${JSON.stringify(text)})`),text+' missing');
-    const click=(text)=>run(`[...document.querySelectorAll('button')].find(b=>b.textContent.trim()===${JSON.stringify(text)}).click()`);
+    const click=(text,within='body')=>run(`[...document.querySelector(${JSON.stringify(within)}).querySelectorAll('button')].find(b=>b.textContent.trim()===${JSON.stringify(text)}).click()`);
     const fill=(id,value)=>run(`(()=>{const input=document.getElementById(${JSON.stringify(id)});Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,${JSON.stringify(value)});input.dispatchEvent(new Event('input',{bubbles:true}));})()`);
-    const select=(label,value)=>run(`(()=>{const input=[...document.querySelectorAll('label')].find(l=>l.firstChild.textContent===${JSON.stringify(label)}).querySelector('select');input.value=${JSON.stringify(value)};input.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+    const select=(label,value)=>run(`(()=>{const input=[...document.querySelectorAll('label')].find(l=>l.firstChild?.textContent===${JSON.stringify(label)}).control;input.value=${JSON.stringify(value)};input.dispatchEvent(new Event('change',{bubbles:true}));})()`);
     let navigation=0;
     async function go(route){
       const url=origin+route+'?fixture='+ ++navigation;
@@ -188,19 +229,70 @@ test('existing React workspace completes catalogue loading and protected command
     await until(()=>run(`location.href===${JSON.stringify(initialPage)} && document.readyState==='complete'`),
       'Initial React page did not render',30000);
     targetAtFixture=true;
-    await visible('Loading…');
-    await until(()=>releaseCountries,'Catalogue loading request did not start');
-    releaseCountries();
-    await visible('United Arab Emirates');await select('Region','EUROPE');
+    await visible('Sandbox discovery fixture');
+    assert.equal(await run("document.querySelector('select option:checked[value=FINXPLOR]')?.value"),'FINXPLOR');
+    assert.equal(fixtureRequests.has('/staff-api/catalogue/countries'),false);
+    assert.equal(await run("document.body.textContent.includes('Finxplor API functions') || document.body.textContent.includes('/api/v1/products/:productId')"),false);
+    await visible('Provider denomination');
+    await visible('Selling price');
+    await visible('Outside pricing scope');
+    await visible('0.00–25.00 USD');
+    await visible('20 Nov 2026, 21:00');
+    await visible('Discovery only');
+    await visible('Outside priced coverage for Guatemala · USD');
+    await visible('Airtel Bangladesh');await visible('AED 17.40');await visible('Demo estimate');
+    assert.equal(fixtureRequests.has('/staff-api/catalogue/price-preview'),false);
+    await click('Preview AED price','.catalogue-product-card');
+    await visible('3.17 GBP');
+    assert.equal(await run("document.querySelectorAll('dialog input').length"),0);
+    assert.ok(await run("document.querySelector('dialog').textContent.includes('Platform feeAED 2.00CommissionAED 0.50')"));
+    await click('Close','dialog');
+    await until(()=>run("document.querySelector('dialog')===null"),'Price preview did not close');
+    await until(()=>run("document.querySelector('.catalogue-brand-logo--airtel-bd img')?.naturalWidth===1152"),'Brand artwork did not load');
+    await until(()=>run("document.querySelector('.catalogue-flag--gt img')?.naturalWidth===1536"),'High-resolution flag artwork was not loaded');
+    assert.deepEqual(await run(`(()=>{const flag=document.querySelector('.catalogue-flag--gt');
+      const bounds=flag.getBoundingClientRect();return [bounds.width,bounds.height,getComputedStyle(flag).borderRadius];})()`),[32,32,'50%']);
+    assert.deepEqual(await run(`(()=>{const flag=document.querySelector('.catalogue-flag--gt img');
+      const style=getComputedStyle(flag);const canvas=document.createElement('canvas');canvas.width=96;canvas.height=96;
+      const context=canvas.getContext('2d');context.drawImage(flag,parseInt(style.left,10)*3,parseInt(style.top,10)*3);
+      return [[0,0],[48,0],[0,48],[48,48],[95,95]].map(([x,y])=>context.getImageData(x,y,1,1).data[3]);})()`),
+      [0,0,0,255,0], 'Full flag sits inside a transparent safety margin');
+    assert.equal(await run("[...document.querySelectorAll('h2')].some(heading=>heading.textContent==='Master catalogue')"),false);
+    assert.ok(fixtureRequests.has('/catalogue-country-flags.png'));
+    assert.equal(await run("getComputedStyle(document.querySelector('.catalogue-discovery-filters select')).paddingLeft"),'38px');
+    const discoveriesNav='nav[aria-label="Provider discoveries pagination"]';
+    await visible('21 results · Page 1 of 2');
+    await click('Next',discoveriesNav);await visible('Second provider page');await visible('Page 2 of 2');
+    assert.equal(await run("document.body.textContent.includes('Sandbox discovery fixture')"),false);
+    await click('Previous',discoveriesNav);await visible('Sandbox discovery fixture');await visible('Page 1 of 2');
+    discoveryPaginationExpired=true;
+    await click('Next',discoveriesNav);await visible('Results changed or this page expired.');
+    await click('Start again');await visible('Page 1 of 2');
+    await select('Rows per page','10');await visible('Page 1 of 3');
+    await select('Product type','Mobile recharge');await visible('Second provider page');await visible('1 result · Page 1 of 1');
+    await select('Source region','GCC');
+    assert.equal(await run("document.querySelectorAll('option[value=GTM]').length"),0);
+    await select('Source country','ARE');await visible('Second provider page');
+    await fill('provider-discovery-search','no-fixture');await click('Find provider products');
+    await visible('No provider products match your filters.');
+    await select('Provider','IPAY');await visible('No products have been imported for this provider.');
+    await select('Provider','FINXPLOR');await visible('Sandbox discovery fixture');
+    configuredCatalogue=true;
+    await go('/catalogue');
+    await visible('Master catalogue');await visible('United Arab Emirates');await select('Region','EUROPE');
     await visible('Germany');
-    assert.equal(await run("document.querySelector('option[value=DE]').disabled"),true);
-    assert.deepEqual([...groupQueries],['GCC','EUROPE']);
+    assert.equal(await run("document.querySelector('option[value=DE]').disabled"),false);
+    await select('Country','DE');await visible('Germany has no configured catalogue services.');
     await select('Region','GCC');await visible('United Arab Emirates');await select('Country','AE');
     await visible('Digital PIN');await select('Service','DIGITAL_PIN');
-    await visible('Fixture provider');await select('Provider','provider-fixture');
-    await visible('First product');await click('Load more');
-    await visible('Second product');await select('Product','1');
-    await visible('Total 102.00 AED');await visible('Provider cost 96.00 AED');await visible('Margin 4.00 AED');
+    await visible('Fixture provider');await select('Catalogue provider','provider-fixture');
+    const productsNav='nav[aria-label="Products pagination"]';
+    await visible('First product');await click('Next',productsNav);
+    await visible('Second product');await click('Previous',productsNav);
+    await visible('First product');await select('Product','1');
+    await visible('Draft total 102.00 AED');await visible('Provider cost 96.00 AED');
+    await visible('Service fee 2.00 AED');await visible('Payment fee 1.50 AED');
+    await visible('Commission 0.50 AED');await visible('Margin 4.00 AED');
     await visible('Observed 2026-11-20T17:00:00Z');await visible('Snapshot completed 2026-11-20T17:01:00Z');
     await visible('Valid until');await visible('Revision 3');
     await run("document.querySelector('input[type=checkbox]').click()");
@@ -214,7 +306,7 @@ test('existing React workspace completes catalogue loading and protected command
     await go('/catalogue');
     await visible('United Arab Emirates');await select('Country','AE');
     await visible('Digital PIN');await select('Service','DIGITAL_PIN');
-    await visible('Fixture provider');await select('Provider','provider-fixture');
+    await visible('Fixture provider');await select('Catalogue provider','provider-fixture');
     await visible('First product');await select('Product','1');
     await visible('Your current access does not permit this view.');
     assert.equal(await run("document.body.textContent.includes('Margin 4.00 AED')"),false);

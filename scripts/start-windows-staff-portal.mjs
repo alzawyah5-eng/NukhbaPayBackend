@@ -1,17 +1,47 @@
-import {readFileSync} from 'node:fs';
+import {existsSync, lstatSync, readFileSync} from 'node:fs';
+import {createHash} from 'node:crypto';
 import {isAbsolute, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {parseEnv} from 'node:util';
 import {createStaffPortal} from '../apps/admin-web/dist/portal.js';
 import {loadBrowserAssets} from '../apps/admin-web/dist/browser-assets.js';
 import {prepareStaffLoginIntegration} from '../apps/admin-web/dist/staff-login-integration.js';
 import {readPendingAuth0Configuration, STAFF_PORTAL_PORT} from '../apps/admin-web/dist/auth0-configuration.js';
-import {createAdministrationAuthority, createStaffAdministration, StaffWorkspaceService} from '../packages/application/dist/application/src/index.js';
+import {administrationUuid, calculateAedPricePreview, createAdministrationAuthority, createStaffAdministration, StaffWorkspaceService} from '../packages/application/dist/application/src/index.js';
 import {parseIdentityRuntimeConfiguration, createWindowsStaffIdentityRuntime, IdentityRuntimeUnavailableError} from '../packages/database/dist/database/src/identity-runtime.js';
 import {createIdentityReaderPool,createIdentityWriterPool,createLocalCatalogueStorage,createStaffAdministrationReader,createStaffWorkspaceStore} from '../packages/database/dist/database/src/index.js';
 import {createWindowsStaffSessionStore} from '../packages/database/dist/database/src/staff-session-store.js';
 import {verifyWindowsStaffConnection,windowsSessionRole,windowsStaffDatabase,windowsStaffTarget} from '../packages/database/dist/database/src/windows-staff-target.js';
 
 const unavailable=()=>new Error('Windows staff portal configuration unavailable');
+const LOCAL_STAFF_SESSION_SECONDS=600;
+function localPricePreview(tenantId,setupId) {
+  const path=new URL('../.local/windows-catalogue-price-preview.json',import.meta.url);
+  if(!existsSync(path))return undefined;
+  try {
+    const file=lstatSync(path);
+    if(!file.isFile()||file.isSymbolicLink()||file.size>2048)return undefined;
+    const {version,tenantId:scope,setupId:target,discoveryId,senderCurrency,senderAmount,demoAedRate}=JSON.parse(readFileSync(path,'utf8'));
+    if(version!==1||scope!==tenantId||target!==setupId||!administrationUuid.test(discoveryId??''))return undefined;
+    const basis=Object.freeze({tenantId,discoveryId,senderCurrency,senderAmount,demoAedRate});
+    calculateAedPricePreview(basis);
+    return basis;
+  }catch{return undefined;}
+}
+function configuredDiscoveryProviders(env) {
+  const path=new URL('../.env',import.meta.url);
+  const file=existsSync(path)?lstatSync(path):undefined;
+  const local=file?.isFile()&&!file.isSymbolicLink()&&file.size<=65536?parseEnv(readFileSync(path,'utf8')):{};
+  const origins={FINXPLOR:['FINXPLOR_BASE_URL'],IRONGATE:['IRONGATE_PREPAID_BASE_URL','IRONGATE_POSTPAID_BASE_URL'],
+    SSL_WIRELESS:['SSL_TOPUP_BASE_URL','SSL_UTILITIES_BASE_URL'],IPAY:['IPAY_SOAP_URL']};
+  return Object.freeze(Object.entries(origins).filter(([,keys])=>keys.some(key=>{
+    const name='NUKHBAPAY_'+key;
+    try {
+      const url=new URL(env[name]??local[name]);
+      return url.protocol==='https:'&&!url.username&&!url.password&&!url.search&&!url.hash;
+    } catch {return false;}
+  })).map(([provider])=>provider));
+}
 class EnrollmentMismatch extends Error {
   constructor(){super('No active staff identity and membership matched the supplied issuer, User ID and selected tenant.');}
 }
@@ -37,7 +67,7 @@ function readWindowsStorageSettings(env) {
 }
 
 export function readWindowsStaffSettings(env) {
-  try {return Object.freeze({...readWindowsStorageSettings(env),auth:readPendingAuth0Configuration(env)});}
+  try {return Object.freeze({...readWindowsStorageSettings(env),auth:readPendingAuth0Configuration(env,LOCAL_STAFF_SESSION_SECONDS)});}
   catch {throw unavailable();}
 }
 
@@ -141,15 +171,33 @@ export async function startWindowsStaffPortal(env=process.env,{preflightOnly=fal
     if(storageOnly){await close();return;}
     stage='active staff enrollment in the selected tenant';
     const scope=await reader.connect();
+    let isolatedCataloguePreview;
     try {
       await scope.query('BEGIN READ ONLY');
       await scope.query("SELECT set_config('nukhabapay.tenant_id',$1,true)",[auth.tenantId]);
-      const {rows:[membership]}=await scope.query(`SELECT EXISTS(SELECT FROM nukhabapay.staff_memberships m
+      const {rows:[membership],rowCount}=await scope.query(`SELECT m.staff_id FROM nukhabapay.staff_memberships m
         JOIN nukhabapay.staff_users u ON u.id=m.staff_id JOIN nukhabapay.staff_identities i ON i.staff_id=u.id
         WHERE m.tenant_id=$1 AND m.status='ACTIVE' AND u.status='ACTIVE' AND i.status='ACTIVE'
-          AND i.issuer=$2 AND i.subject=$3) AS active`,[auth.tenantId,issuer,env.NUKHBAPAY_STAFF_ENROLLMENT_SUBJECT]);
-      if(membership?.active===false)throw new EnrollmentMismatch();
-      if(membership?.active!==true)throw unavailable();
+          AND i.issuer=$2 AND i.subject=$3`,[auth.tenantId,issuer,env.NUKHBAPAY_STAFF_ENROLLMENT_SUBJECT]);
+      if(rowCount!==1||!membership?.staff_id)throw new EnrollmentMismatch();
+      const grantPath=new URL('../.local/windows-catalogue-preview-grant.json',import.meta.url);
+      if(existsSync(grantPath)) {
+        const stat=lstatSync(grantPath);
+        if(stat.isFile()&&!stat.isSymbolicLink()&&stat.size<=1024) {
+          const grant=JSON.parse(readFileSync(grantPath,'utf8'));
+          const subjectDigest=createHash('sha256').update(issuer+'\n'+env.NUKHBAPAY_STAFF_ENROLLMENT_SUBJECT).digest('hex');
+          if(grant.version===1&&grant.tenantId===auth.tenantId&&grant.databaseOid===target.databaseOid&&
+             grant.systemIdentifier===target.systemIdentifier&&grant.subjectDigest===subjectDigest&&
+             grant.staffId===membership.staff_id) {
+            const {rows:[manager]}=await scope.query(`SELECT EXISTS(SELECT FROM nukhabapay.tenant_role_grants g
+              JOIN nukhabapay.staff_memberships m ON (m.tenant_id,m.id)=(g.tenant_id,g.membership_id)
+              WHERE m.tenant_id=$1 AND m.staff_id=$2 AND m.status='ACTIVE' AND g.role_code='TENANT_STAFF_MANAGER'
+                AND g.revoked_at IS NULL AND g.granted_at<=clock_timestamp()
+                AND (g.expires_at IS NULL OR g.expires_at>clock_timestamp())) AS active`,[auth.tenantId,membership.staff_id]);
+            if(manager?.active===true)isolatedCataloguePreview=Object.freeze({tenantId:auth.tenantId,staffId:membership.staff_id});
+          }
+        }
+      }
       await scope.query('COMMIT');
     }catch(error){await scope.query('ROLLBACK').catch(()=>{});throw error;}
     finally{scope.release();}
@@ -167,10 +215,12 @@ export async function startWindowsStaffPortal(env=process.env,{preflightOnly=fal
       stage='dedicated catalogue reader connection';
       catalogue=await createLocalCatalogueStorage({setupId,password:cataloguePassword},new Map([[auth.tenantId,[]]]));
       console.info('Dedicated local catalogue storage verified through its read-only role.');
+      if(isolatedCataloguePreview)console.info('Local read-only Catalogue grant matched the active staff enrollment.');
     }
     const {staffAdministration,staffCatalogue}=createStaffAdministration({repository,auditWriter,now,readers:{
       staff:createStaffAdministrationReader(reader),...(catalogue && {catalogue:catalogue.read}),
-    }});
+    },...(catalogue && {configuredDiscoveryProviders:configuredDiscoveryProviders(env)}),
+      ...(catalogue && isolatedCataloguePreview && {isolatedCataloguePreview})});
     const staffWorkspace=new StaffWorkspaceService({repository,now,authority:createAdministrationAuthority(repository,now),
       store:createStaffWorkspaceStore(reader,writer)});
     stage='Auth0 staff session integration';
@@ -184,9 +234,13 @@ export async function startWindowsStaffPortal(env=process.env,{preflightOnly=fal
       return;
     }
     stage='HTTPS listener on port 3001';
+    const previewBasis=catalogue && isolatedCataloguePreview ? localPricePreview(auth.tenantId,setupId) : undefined;
+    if(previewBasis)console.info('Saved provider sender cost loaded for the local AED preview.');
     portal=await createStaffPortal({pfx,certificate,passphrase,port:STAFF_PORTAL_PORT,browserAssets,environment:{NODE_ENV:'development'},
       sessions:integration.sessions,login:integration.login,staffManagement:staffAdministration,staffWorkspace,
       ...(staffCatalogue && {staffCatalogue}),
+      ...(staffCatalogue && isolatedCataloguePreview && {localCataloguePreview:true}),
+      ...(previewBasis && {localPricePreview:previewBasis}),
       departmentAccess:staffWorkspace,windowsStaffStorageReady:ready});
     let closing;
     return Object.freeze({origin:portal.origin,close:()=>closing??=close()});

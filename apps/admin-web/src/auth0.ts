@@ -13,6 +13,7 @@ const equal = (a: string, b: string) => a.length === b.length && timingSafeEqual
 const text = (v: unknown, max = 512): v is string => typeof v === "string" && v.length > 0 && v.length <= max && !/[\s\u0000-\u001f\u007f]/.test(v);
 const date = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) >= 0;
 const AUTH0_DEPENDENCY_TIMEOUT_MS = 3000;
+const DEFAULT_ACCESS_TOKEN_LIFETIME_SECONDS = 300;
 
 export type StaffCallbackFailureStage =
   | "callback-state" | "authorization-response" | "token-exchange" | "token-response"
@@ -28,6 +29,8 @@ export interface Auth0Configuration {
   readonly audience: string;
   /** Trusted server opt-in only. Absent means scalar API audience only. */
   readonly accessTokenAudienceMode?: "api-only" | "api-and-userinfo";
+  /** Capacity for ordinary sign-in in the guarded local development portal. */
+  readonly localSessionLifetimeSeconds?: 600;
   /** Exact operator-owned HTTPS claim name; the signed access-token value must be "human". */
   readonly staffKindClaim: string;
   readonly callbackUrl: string;
@@ -47,6 +50,7 @@ export function validateAuth0Configuration(input: Auth0Configuration): Readonly<
         !["https:", "urn:"].includes(audience.protocol) || audience.username || audience.password || audience.search || audience.hash ||
         input.audience === new URL("userinfo", issuer).href ||
         input.accessTokenAudienceMode !== undefined && !["api-only", "api-and-userinfo"].includes(input.accessTokenAudienceMode) ||
+        input.localSessionLifetimeSeconds !== undefined && (input.localSessionLifetimeSeconds !== 600 || input.tenantId === null) ||
         claim.protocol !== "https:" || claim.href !== input.staffKindClaim || claim.pathname === "/" || claim.search || claim.hash || claim.username || claim.password ||
         !text(input.staffKindClaim) || claim.port || isIP(claim.hostname) || !claim.hostname.includes(".") ||
         /(?:^|\.)(?:localhost|local|auth0\.com|webtask\.io|webtask\.run)$/.test(claim.hostname) ||
@@ -334,7 +338,8 @@ export class Auth0Login {
       max_age: "0", prompt: "login" }).toString();
     return { location: location.href, cookie: transactionCookie(id) };
   }
-  async #verify(token: unknown, kind: "id" | "access", now: Date, mark: (stage: StaffCallbackFailureStage) => void) {
+  async #verify(token: unknown, kind: "id" | "access", now: Date, mark: (stage: StaffCallbackFailureStage) => void,
+    accessTokenLifetimeSeconds: number) {
     mark(kind === "id" ? "id-token-format" : "access-token-profile");
     if (!text(token, 8192) || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token)) throw fail();
     const h = decodeProtectedHeader(token);
@@ -356,7 +361,7 @@ export class Auth0Login {
         p.nbf !== undefined && (!date(p.nbf) || p.nbf >= p.exp) ||
         ["act", "may_act", "gty", "sub_profile", "client_profile"].some(n => n in p)) throw fail();
     mark(kind === "id" ? "id-token-lifetime" : "access-token-lifetime");
-    if (p.exp - p.iat > (kind === "id" ? 3600 : 300)) throw fail();
+    if (p.exp - p.iat > (kind === "id" ? 3600 : accessTokenLifetimeSeconds)) throw fail();
     mark(kind === "id" ? "id-token-verification" : "access-token-audience");
     if (!(kind === "id" ? p.aud === this.#config.clientId : this.#accessAudience(p.aud))) throw fail();
     mark(kind === "id" ? "id-token-mfa" : "access-token-claims");
@@ -400,6 +405,21 @@ export class Auth0Login {
   }
 
   get platformScope(): boolean { return this.#config.tenantId === null; }
+
+  /** A process restart loses the signed-identity association. The browser
+   * token still requires durable session validation when this check passes. */
+  hasLocalSessionIdentity(token: string): boolean {
+    if (this.#closed || !opaque.test(token)) return false;
+    const identity = this.#staffSessions.get(createHash('sha256').update(token).digest('hex'));
+    return identity !== undefined && this.#time() < identity.security.expiresAt * 1000;
+  }
+
+  hasPendingLogin(transactionId: string | undefined): boolean {
+    if (this.#closed || !transactionId || !opaque.test(transactionId)) return false;
+    const transaction = this.#transactions.get(transactionId);
+    return transaction !== undefined && !transaction.stepUp && !transaction.cancellation.signal.aborted &&
+      transaction.expires > this.#time();
+  }
 
   async #readScopedSession<T>(token: string, read: (identity: ReturnType<typeof attestVerifiedStaffIdentity>,
     staffId:string,revalidate:()=>Promise<boolean>) => Promise<T>): Promise<T> {
@@ -484,19 +504,29 @@ export class Auth0Login {
       Promise<{ token: string; proof?: StaffStepUpProof }> {
     let stage: StaffCallbackFailureStage = "callback-state";
     const mark = (next: StaffCallbackFailureStage) => { stage = next; };
-    // Consume before any await: replay, concurrent callbacks and failed exchanges cannot retry.
     const transaction = transactionId && opaque.test(transactionId) ? this.#transactions.get(transactionId) : undefined;
-    if (transactionId) this.#transactions.delete(transactionId);
-    if (transaction && transactionId) this.#inflight.set(transactionId, transaction);
+    const consume = () => {
+      if (transactionId) this.#transactions.delete(transactionId);
+      if (transaction && transactionId) this.#inflight.set(transactionId, transaction);
+    };
+    if (stepUp) consume();
     try {
       if (this.#closed || !transaction || transaction.expires <= this.#time() || rawUrl.length > 4096 ||
           !rawUrl.startsWith("/auth/callback?") || rawUrl.includes("#")) throw fail();
       if (stepUp !== Boolean(transaction.stepUp)) throw fail();
+      const url = new URL(rawUrl, this.origin), params = url.searchParams;
+      if (!stepUp) {
+        // An older tab can present the newer attempt's cookie. Check state
+        // before consuming it, and consume a matching state before any await.
+        if (url.origin !== this.origin || url.pathname !== "/auth/callback" ||
+            params.getAll("state").length !== 1 || !opaque.test(params.get("state") ?? "") ||
+            !equal(params.get("state")!, transaction.state)) throw fail();
+        consume();
+      }
       if (transaction.stepUp && (!transaction.previousToken ||
           currentToken !== undefined && currentToken !== transaction.previousToken ||
           !await this.#validStepUp(transaction.stepUp, transaction.previousToken, transaction.expires, transaction.cancellation.signal))) throw fail();
       if (this.#closed || transaction.cancellation.signal.aborted || transaction.expires <= this.#time()) throw fail();
-      const url = new URL(rawUrl, this.origin), params = url.searchParams;
       if (params.has("error")) mark("authorization-response");
       if (url.origin !== this.origin || url.pathname !== "/auth/callback" ||
           [...params.keys()].some(k => !["code", "state", "iss"].includes(k)) ||
@@ -513,11 +543,14 @@ export class Auth0Login {
       mark("token-response");
       if (tokens['token_type'] !== "Bearer" || !date(tokens['expires_in']) || tokens['expires_in'] < 1 || 'refresh_token' in tokens) throw fail();
       mark("access-token-lifetime");
-      if (tokens['expires_in'] > 300) throw fail();
+      const lifetime = transaction.stepUp ? DEFAULT_ACCESS_TOKEN_LIFETIME_SECONDS :
+        this.#config.localSessionLifetimeSeconds ?? DEFAULT_ACCESS_TOKEN_LIFETIME_SECONDS;
+      if (tokens['expires_in'] > lifetime) throw fail();
       const now = new Date(this.#time());
-      const id = await this.#verify(tokens['id_token'], "id", now, mark), access = await this.#verify(tokens['access_token'], "access", now, mark);
+      const id = await this.#verify(tokens['id_token'], "id", now, mark, lifetime);
+      const access = await this.#verify(tokens['access_token'], "access", now, mark, lifetime);
       mark("signed-token-binding");
-      const expiry = Math.min(access.exp!, id.exp!, (id['auth_time'] as number) + 300);
+      const expiry = Math.min(access.exp!, id.exp!, (id['auth_time'] as number) + lifetime);
       const current = () => !transaction.cancellation.signal.aborted && !this.#closed &&
         this.#time() < Math.min(transaction.expires, expiry * 1000);
       if (!text(id['nonce'], 128) || !equal(id['nonce'], transaction.nonce) || id.sub !== access.sub || (id['auth_time'] as number) < Math.floor(transaction.startedAtMs/1000) ||

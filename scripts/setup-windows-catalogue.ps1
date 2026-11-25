@@ -1,8 +1,12 @@
 [CmdletBinding()]
-param([switch]$ForStartup, [switch]$Check, [switch]$Rehearse)
+param([switch]$ForStartup, [switch]$Check, [switch]$Rehearse, [switch]$ImportFinxplor, [switch]$Full,
+  [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$')][string]$ProductId)
 
 $ErrorActionPreference = 'Stop'
-if (!$ForStartup -and !$Check -and !$Rehearse) { $Host.UI.RawUI.WindowTitle = 'NukhbaPay | Private local catalogue setup' }
+if ($ImportFinxplor -and ($ForStartup -or $Check -or $Rehearse)) { throw 'Select one catalogue operation.' }
+if ($Full -and !$ImportFinxplor) { throw 'Full import requires ImportFinxplor.' }
+if ($ProductId -and (!$ImportFinxplor -or $Full)) { throw 'A product detail check requires ImportFinxplor without Full.' }
+if (!$ForStartup -and !$Check -and !$Rehearse -and !$ImportFinxplor) { $Host.UI.RawUI.WindowTitle = 'NukhbaPay | Private local catalogue setup' }
 $project = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $vault = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Nukhbapay\staff-portal'
 $profile = Join-Path $vault 'windows-catalogue.clixml'
@@ -41,7 +45,7 @@ try {
     $receipt = Get-Content -Raw -LiteralPath $receiptPath | ConvertFrom-Json
     $qualified = $receipt.status -ceq 'verified' -and $receipt.foundationInstalled -eq $true -and $receipt.backendReaderVerified -eq $true
   }
-  if (($Check -or $Rehearse) -and !$qualified) { throw 'The local catalogue database needs first-time setup.' }
+  if (($Check -or $Rehearse -or $ImportFinxplor) -and !$qualified) { throw 'The local catalogue database needs first-time setup.' }
   if (!(Test-Path -LiteralPath $vault)) {
     if ($qualified) { throw 'The protected catalogue credential vault is missing.' }
     [void](New-Item -ItemType Directory -Path $vault)
@@ -92,6 +96,7 @@ try {
   }
   $rolesForProcess = $roles
   if ($qualified) { $rolesForProcess = @('nukhbapay_catalogue_reader', 'nukhbapay_catalogue_migrator') }
+  if ($ImportFinxplor) { $rolesForProcess = @('nukhbapay_catalogue_runtime') }
   foreach ($role in $rolesForProcess) {
     if ($settings.Credentials[$role] -isnot [Security.SecureString] -or $settings.Credentials[$role].Length -ne 64) {
       throw 'A protected catalogue role credential is missing.'
@@ -108,9 +113,12 @@ try {
   $launch.FileName = $client
   $launch.WorkingDirectory = $project
   $launch.Arguments = 'scripts/local-catalogue-setup.mjs'
-  if ($Rehearse) { $launch.Arguments += ' --rehearse' }
+  if ($ImportFinxplor) { $launch.Arguments = 'scripts/import-finxplor-pilot.mjs' }
+  elseif ($Rehearse) { $launch.Arguments += ' --rehearse' }
   elseif ($Check) { $launch.Arguments += ' --check' }
   elseif ($qualified) { $launch.Arguments += ' --migrate' }
+  if ($Full) { $launch.Arguments += ' --full' }
+  if ($ProductId) { $launch.Arguments += ' --detail ' + $ProductId }
   $launch.UseShellExecute = $false
   $launch.EnvironmentVariables.Clear()
   foreach ($name in 'PATH', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'LOCALAPPDATA', 'USERPROFILE') {
@@ -135,7 +143,7 @@ try {
     Write-Host 'Local catalogue database foundation verified.'
   }
 } catch {
-  if ($ForStartup -or $Check -or $Rehearse) { throw }
+  if ($ForStartup -or $Check -or $Rehearse -or $ImportFinxplor) { throw }
   if (!$qualified) { Set-Content -LiteralPath $status -Value 'catalogue-setup-stopped' }
   Write-Host 'Catalogue setup stopped. Check the message above before retrying in this window.'
 } finally {
@@ -143,4 +151,4 @@ try {
   if ($admin) { $admin.Dispose() }
   if ($settings) { foreach ($credential in $settings.Credentials.Values) { $credential.Dispose() } }
 }
-if (!$ForStartup -and !$Check -and !$Rehearse) { [void](Read-Host 'Press Enter to close this private window') }
+if (!$ForStartup -and !$Check -and !$Rehearse -and !$ImportFinxplor) { [void](Read-Host 'Press Enter to close this private window') }
