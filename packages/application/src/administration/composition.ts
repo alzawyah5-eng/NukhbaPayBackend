@@ -23,11 +23,14 @@ export function createStaffAdministration(deps: {
   readonly isolatedStaffReadScope?: IsolatedStaffReadScope;
   readonly isolatedWorkspaceTenant?: string;
   readonly isolatedCataloguePreview?: IsolatedStaffReadScope;
+  readonly stagingCatalogueTenant?: string;
   readonly configuredDiscoveryProviders?: readonly string[];
   readonly now: () => Date;
 }) {
   const { repository, auditWriter, readers, now } = deps;
   const authority = createAdministrationAuthority(repository, now);
+  const catalogueScope = deps.stagingCatalogueTenant
+    ? { stagingTenantId: deps.stagingCatalogueTenant } : deps.isolatedCataloguePreview;
   const actors = new TrustedStaffActorBoundary({
     repository, auditWriter, now,
     ...(readers.requests && { requests: readers.requests }),
@@ -60,8 +63,8 @@ export function createStaffAdministration(deps: {
     }),
     ...(readers.catalogue && {
       staffCatalogue: new StaffCatalogueService({
-        authority: deps.isolatedCataloguePreview
-          ? createAdministrationAuthority(repository, now, undefined, undefined, deps.isolatedCataloguePreview) : authority,
+        authority: catalogueScope
+          ? createAdministrationAuthority(repository, now, undefined, undefined, catalogueScope) : authority,
         read: readers.catalogue, audit: auditRead, now,
         ...(deps.configuredDiscoveryProviders && {configuredDiscoveryProviders:deps.configuredDiscoveryProviders}),
       }),

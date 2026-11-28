@@ -1,4 +1,4 @@
-import { authorizeIsolatedCataloguePreview, authorizeIsolatedStaffRead, authorizeIsolatedTenantWorkspace, authorizeStaffAccess, resolveStaffTenantContext,
+import { authorizeIsolatedCataloguePreview, authorizeIsolatedStaffRead, authorizeIsolatedTenantWorkspace, authorizeStaffAccess, authorizeStagingCatalogueRead, resolveStaffTenantContext,
   type IsolatedStaffReadScope, type StaffAuthorizationRepository, type StaffAuthorizationRequest } from '../identity/staff-access.js';
 import { isVerifiedStaffIdentity, type VerifiedStaffIdentity } from '../identity/verified-staff-identity.js';
 
@@ -13,9 +13,10 @@ export interface AdministrationAuthority {
 }
 /** The default authority enforces the active phase. An isolated read scope is selected by trusted composition. */
 export function createAdministrationAuthority(repository:StaffAuthorizationRepository,now:()=>Date,
-  isolatedReadScope?:IsolatedStaffReadScope,isolatedWorkspaceTenant?:string,isolatedCataloguePreview?:IsolatedStaffReadScope):AdministrationAuthority {
+  isolatedReadScope?:IsolatedStaffReadScope,isolatedWorkspaceTenant?:string,
+  catalogueReadScope?:IsolatedStaffReadScope | {readonly stagingTenantId:string}):AdministrationAuthority {
   const scope=isolatedReadScope && Object.freeze({ ...isolatedReadScope });
-  const catalogue=isolatedCataloguePreview && Object.freeze({ ...isolatedCataloguePreview });
+  const catalogue=catalogueReadScope && Object.freeze({ ...catalogueReadScope });
   return Object.freeze({async require(identity:VerifiedStaffIdentity,tenantId:string,permission:string){
     if(!isVerifiedStaffIdentity(identity))throw new AdministrationError(401);
     if(!administrationUuid.test(tenantId))throw new AdministrationError(400);
@@ -30,8 +31,12 @@ export function createAdministrationAuthority(repository:StaffAuthorizationRepos
       const ordinary=request.scope==='SELF' ? authorizeStaffAccess(context,request)
         : isolatedWorkspaceTenant ? authorizeIsolatedTenantWorkspace(context,request,isolatedWorkspaceTenant)
         : scope ? authorizeIsolatedStaffRead(context,request,scope) : authorizeStaffAccess(context,request);
-      const decision=!ordinary.allowed && catalogue && permission==='catalog.read'
-        ? authorizeIsolatedCataloguePreview(context,request,catalogue) : ordinary;
+      let decision=ordinary;
+      if(!ordinary.allowed && catalogue && permission==='catalog.read'){
+        decision='stagingTenantId' in catalogue
+          ? authorizeStagingCatalogueRead(context,request,catalogue.stagingTenantId)
+          : authorizeIsolatedCataloguePreview(context,request,catalogue);
+      }
       if(!decision.allowed||now().getTime()>=identity.security.expiresAt*1000)throw new AdministrationError(403);
       return context;
     };

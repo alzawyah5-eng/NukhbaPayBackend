@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
 import test from 'node:test';
+import {createStaffAdministration} from '../src/administration/composition.js';
 import {StaffCatalogueService,consumeStaffCatalogueRead,type StaffCatalogueSnapshot} from '../src/catalog/staff-catalogue.js';
+import type {StaffAuthorizationRepository,StaffRoleGrant} from '../src/identity/staff-access.js';
 import {attestVerifiedStaffIdentity} from '../src/identity/verified-staff-identity.js';
 import {SYNTHETIC_PRODUCT,SYNTHETIC_NOW,createSyntheticProviders} from '../../provider-adapters/src/index.js';
 async function fixture(){
@@ -23,6 +25,38 @@ test('geography and explicit country/service/provider availability remain indepe
  assert.equal((await f.service.read(f.identity,f.tenant,'providers',{country:'AE',service:'DIGITAL_PIN'})).items[0]!.id,f.provider);
  assert.equal((await f.service.read(f.identity,f.tenant,'products',{provider:'unconfigured'})).items.length,0);
 });
+
+test('staging activates catalogue reads for the configured tenant and respects active grants',async()=>{
+ const f=await fixture(),staffId=randomUUID(),membershipId=randomUUID(),foreignTenant=randomUUID();
+ const grant:StaffRoleGrant={roleCode:'CATALOG_OPERATOR',scope:'TENANT',grantedAt:SYNTHETIC_NOW,expiresAt:null,revokedAt:null};
+ let grants=[grant];
+ let reads=0,audits=0;
+ const repository:StaffAuthorizationRepository={
+   findByTrustedIdentity:async()=>({staffId,staffStatus:'ACTIVE',identityStatus:'ACTIVE',authzVersion:1n,tokensValidAfter:null}),
+   findTenantMembership:async(_staffId,tenantId)=>({membershipId,tenantId,status:'ACTIVE',version:1n,roleGrants:grants}),
+   findPlatformRoleGrants:async()=>[],
+ };
+ const deps={repository,now:()=>new Date(SYNTHETIC_NOW),
+   auditWriter:{appendSecurityAuditEvents:async()=>{audits++;}},
+   readers:{catalogue:async(ticket:Parameters<typeof consumeStaffCatalogueRead>[0])=>{
+     assert.equal(consumeStaffCatalogueRead(ticket).tenantId,f.tenant);
+     reads++;
+     return f.data;
+   }},
+ };
+ const strict=createStaffAdministration(deps).staffCatalogue!;
+ const staging=createStaffAdministration({...deps,stagingCatalogueTenant:f.tenant}).staffCatalogue!;
+ await assert.rejects(()=>strict.available(f.identity,f.tenant),{status:403});
+ assert.equal(await staging.available(f.identity,f.tenant),true);
+ assert.equal((await staging.read(f.identity,f.tenant,'products',{})).count,2);
+ await assert.rejects(()=>staging.available(f.identity,foreignTenant),{status:403});
+ grants=[grant,{...grant,roleCode:'PRICING_EDITOR'}];
+ await assert.rejects(()=>staging.read(f.identity,f.tenant,'offers',{}),{status:403});
+ grants=[{...grant,revokedAt:SYNTHETIC_NOW}];
+ await assert.rejects(()=>staging.available(f.identity,f.tenant),{status:403});
+ assert.deepEqual({reads,audits},{reads:1,audits:1});
+});
+
 test('economics reuse exact existing pricing and require separate authorization',async()=>{
  const f=await fixture();const page=await f.service.read(f.identity,f.tenant,'economics',{});assert.equal(page.items[0]!['total'],'102.00');assert.equal(page.items[0]!['margin'],'2.77');assert.equal(page.items[0]!['canPublish'],false);
  const products=await f.service.read(f.identity,f.tenant,'products',{});assert.equal(JSON.stringify(products).includes('providerCost'),false);

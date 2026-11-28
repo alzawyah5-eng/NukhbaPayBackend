@@ -48,6 +48,7 @@ try {
     backend:{repository,auditWriter,sessionStore:sessions,checkReadiness}});
   const {staffAdministration,staffCatalogue}=createStaffAdministration({repository,auditWriter,now,
     readers:{staff:createStaffAdministrationReader(reader),catalogue:catalogue.read},
+    stagingCatalogueTenant:auth.tenantId,
     configuredDiscoveryProviders:['FINXPLOR','IPAY']});
   const staffWorkspace=new StaffWorkspaceService({repository,now,authority:createAdministrationAuthority(repository,now),
     store:createStaffWorkspaceStore(reader,writer)});

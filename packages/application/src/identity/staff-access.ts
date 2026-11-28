@@ -2,6 +2,7 @@ import {
   ACTIVE_AUTHORIZATION_PHASE,
   findPermissionDefinition,
   findRoleDefinition,
+  type ActivationPhase,
 } from "./permission-catalog.js";
 import { isVerifiedStaffIdentity } from "./verified-staff-identity.js";
 
@@ -277,6 +278,18 @@ export function authorizeIsolatedCataloguePreview(
   return evaluateStaffAccess(context, { ...request, permissionCode: "tenant.staff.read" }, ["TENANT_STAFF_MANAGER"]);
 }
 
+/** Activate the existing catalogue read permission for the configured staging tenant. */
+export function authorizeStagingCatalogueRead(
+  context: StaffAuthorizationContext,
+  request: StaffAuthorizationRequest,
+  tenantId: string,
+): StaffAuthorizationDecision {
+  if (request.scope !== "TENANT" || request.permissionCode !== "catalog.read" || request.tenantId !== tenantId) {
+    return deny("SCOPE_MISMATCH");
+  }
+  return evaluateStaffAccess(context, request, undefined, "4");
+}
+
 export function activeTenantRoleCodes(context: ResolvedStaffTenantContext, now: number): readonly string[] {
   const membership=context.membership;
   if (!membership || membership.status!=="ACTIVE") return [];
@@ -288,6 +301,7 @@ function evaluateStaffAccess(
   context: StaffAuthorizationContext | null | undefined,
   request: StaffAuthorizationRequest | null | undefined,
   isolatedRoles?: readonly string[],
+  tenantActivationPhase: ActivationPhase = ACTIVE_AUTHORIZATION_PHASE,
 ): StaffAuthorizationDecision {
   if (context == null || request == null || context.principal === null) {
     return deny("MISSING_CONTEXT");
@@ -355,7 +369,7 @@ function evaluateStaffAccess(
   if (isolatedRoles && !isolatedRoles.some(role => roles.active.has(role) &&
       findRoleDefinition(role)?.permissions.includes(request.permissionCode))) return deny("GRANT_INACTIVE");
   if (!hasPermission(roles.active, request.permissionCode)) return deny("GRANT_INACTIVE");
-  if (permission.activationPhase !== ACTIVE_AUTHORIZATION_PHASE &&
+  if (permission.activationPhase !== tenantActivationPhase &&
       !(isolatedRoles && permission.activationPhase === "3C")) {
     return deny("PERMISSION_INACTIVE");
   }
