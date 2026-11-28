@@ -9,4 +9,4 @@ export { checkIronGateCallback } from "./irongate-callback.ts";
 export { createIronGatePrepaidReceiptReader } from "./irongate-prepaid-receipt.ts";
 export { createIronGatePostpaidReceiptReader } from "./irongate-postpaid-receipt.ts";
 export { qualifySslCatalogueRead, qualifyIronGateCatalogueRead } from "./sandbox-catalogue-qualification.ts";
-export { FinxplorCatalogue, type FinxplorAccount, type FinxplorProduct } from "./finxplor-catalogue.ts";
+export { FinxplorCatalogue, finxplorCatalogueCostEvidence, type FinxplorAccount, type FinxplorCatalogueFilter, type FinxplorProduct } from "./finxplor-catalogue.ts";

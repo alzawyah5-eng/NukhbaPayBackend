@@ -8,6 +8,9 @@ export type {
   SyntheticImportResult,
 } from "./catalog/synthetic-provider-import.js";
 export { assertGeneratedDraftPublicationCandidate, classifyAdvisoryPublicationEvidence, generateDraftPublicationCandidate } from "./catalog/publication-candidate.js";
+export { prepareAedCommercialPriceDraft, assertPreparedAedCommercialPriceDraft,
+  type AedCommercialDraftBinding, type AedCommercialPriceDraft } from "./catalog/commercial-price-draft.js";
+export { validateAedCommercialPriceObservation, type AedCommercialFxInput, type AedCommercialPriceBinding } from "./catalog/commercial-price-observation.js";
 export type { AdvisoryPublicationEvidence, DraftPublicationCandidate, DraftPublicationRequest, PublicationSourceSnapshot } from "./catalog/publication-candidate.js";
 export { reviewHybridPricing, type HybridPricingEvidence } from './catalog/hybrid-pricing.js';
 export {
@@ -107,10 +110,16 @@ export type {CatalogRefreshSchedule} from "./catalog/refresh-schedule.js";
 export * from './administration/access.js';
 export * from './administration/staff-management.js';
 export * from './catalog/staff-catalogue.js';
+export * from './catalog/catalogue-pricing-review.js';
 export * from './catalog/catalogue-geography.js';
 
 export * from './catalog/durable-refresh.js';
 
 export * from './administration/composition.js';
 export * from './administration/staff-workspace.js';
-export { calculateAedPricePreview, type LocalPricePreviewBasis } from './catalog/price-preview.js';
+export { AED_NORMALIZATION_UNAVAILABLE, AedNormalizationUnavailableError } from './fx/normalization-unavailable.js';
+export * from './fx/contracts.js';
+export * from './fx/normalization.js';
+
+export { calculateAedAcquisitionCost, ACQUISITION_CALCULATOR_VERSION, LEGACY_ACQUISITION_CALCULATOR_VERSION }
+  from '../../domain/src/acquisition-cost.js';

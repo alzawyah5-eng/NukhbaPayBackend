@@ -1,0 +1,25 @@
+{
+  "live": {
+    "enabled": false,
+    "approvedCostSource": null,
+    "approvedFxSource": null,
+    "policy": null
+  },
+  "workerLimits": { "batchLimit": 50, "normalizationTimeoutMs": 10000, "deliveryTimeoutMs": 10000 },
+  "syntheticExample": {
+    "version": "synthetic-layer1-v1",
+    "revision": 1,
+    "provenance": "SYNTHETIC",
+    "effectiveFrom": "2026-01-01T00:00:00Z",
+    "validUntil": "2027-01-01T00:00:00Z",
+    "approvedCostSource": "synthetic-account-quote",
+    "approvedFxSource": "synthetic-direct-fx",
+    "maxRateAgeMs": 3600000,
+    "maxCostAgeMs": 3600000,
+    "currencyScales": { "AED": 2, "USD": 2, "JPY": 0, "BHD": 3 },
+    "rateScale": 12,
+    "rounding": "HALF_UP",
+    "permittedUses": ["INTERNAL_REVIEW"],
+    "refreshIntervalMs": 900000
+  }
+}

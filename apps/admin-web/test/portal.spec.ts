@@ -109,6 +109,24 @@ test('staff workspace routes require a real browser session and CSRF, and carry 
     assert.deepEqual(commands,[input]);
   } finally {await app.close();integration.close();}
 });
+// Previous Layer 1 implementation — disabled while rebuilding according to the new approved architecture.
+// test('local price previews accept the pilot format and reject duplicate costs or an incorrect scope',()=>{
+//   const tenantId=randomUUID();
+//   const setupId='test-setup';
+//   const entry={discoveryId:randomUUID(),senderCurrency:'GBP',senderAmount:'3.17',demoAedRate:'4.70'};
+//   const fees={platformFeeAed:'2.00',commissionAed:'0.50'};
+//   assert.equal(readLocalPricePreviewBook({version:1,tenantId,setupId,...entry,...fees},tenantId,setupId)
+//     .prices.get(entry.discoveryId)?.indicativePrice,'17.40');
+//   const batch={version:2,tenantId,setupId,entries:[entry],...fees};
+//   assert.equal(readLocalPricePreviewBook({...batch,platformFeeAed:'1.00',commissionAed:'0.25'},tenantId,setupId)
+//     .prices.get(entry.discoveryId)?.indicativePrice,'16.15');
+//   assert.throws(()=>readLocalPricePreviewBook({...batch,platformFeeAed:undefined},tenantId,setupId));
+//   assert.throws(()=>readLocalPricePreviewBook(batch,randomUUID(),setupId));
+//   assert.throws(()=>readLocalPricePreviewBook(batch,tenantId,'other-setup'));
+//   assert.throws(()=>readLocalPricePreviewBook({...batch,entries:[entry,entry]},tenantId,setupId));
+//   assert.throws(()=>readLocalPricePreviewBook({...batch,entries:[{...entry,demoAedRate:'0'}]},tenantId,setupId));
+// });
+
 test('department login scopes direct reads and writes to the selected live grant and invalidates regrants',async()=>{
   const reservation=createNetServer();
   await new Promise<void>(resolve=>reservation.listen(0,'127.0.0.1',resolve));
@@ -123,17 +141,40 @@ test('department login scopes direct reads and writes to the selected live grant
   let catalogueReads=0, replacePricingGrant=false;
   let nativeStorageAvailable=false;
   const discoveryId=randomUUID();
+  const otherDiscoveryId=randomUUID();
+  const missingCostId=randomUUID();
+  const replacedDiscoveryId=randomUUID();
   let currentDiscovery=true;
+  let priceStorageDown = false;
+  let xeRefreshRuns = 0;
+  const customerPrice = {basis:'CUSTOMER_PRICE',sourceKey:'test-price',sourceAmount:'3.17',
+    sourceCurrency:'GBP',convertedAed:'16.24135802116804',rateSource:'CURRENCY_API'} as const;
   const app=await createStaffPortal({pfx,certificate,passphrase,port,environment:{NODE_ENV:'development'},login:integration.login,
     windowsStaffStorageReady:async()=>nativeStorageAvailable,
     localCataloguePreview:true,
-    localPricePreview:{tenantId:config.tenantId!,discoveryId,senderCurrency:'GBP',senderAmount:'3.17',demoAedRate:'4.70'},
+    finxplorLayer1Prices:async (tenantId,ids)=>{
+      assert.equal(tenantId,config.tenantId);
+      assert.ok(!ids.includes(missingCostId));
+      if (priceStorageDown) throw new Error('Fixture storage unavailable');
+      return new Map(ids.map(id=>[id,id===discoveryId ? [customerPrice] : []]));
+    },
+    refreshFxRates:async tenantId=>{
+      assert.equal(tenantId,config.tenantId);
+      xeRefreshRuns++;
+      return {status:'not-configured'};
+    },
+    syncCatalogue:async tenantId=>{
+      assert.equal(tenantId,config.tenantId);
+      return {products:101,inserted:1,unchanged:100,layer1:{amounts:105,pendingFx:2}};
+    },
     staffCatalogue:{available:async()=>true,read:async(_identity,tenant,view,query)=> {
       catalogueReads++;
       if(view==='discoveries'){
         assert.equal(tenant,config.tenantId);
-        if(query['discoveryId'])assert.equal(query['discoveryId'],discoveryId);
-        return {revision:'fixture-revision',items:currentDiscovery?[{id:discoveryId}]:[],next:null,previous:null,count:currentDiscovery?1:0};
+        const items=[{id:currentDiscovery?discoveryId:replacedDiscoveryId,providerId:'FINXPLOR'},
+          {id:otherDiscoveryId,providerId:'FINXPLOR'},{id:missingCostId,providerId:'SSL_WIRELESS'}]
+          .filter(item=>!query['discoveryId'] || item.id===query['discoveryId']);
+        return {revision:'fixture-revision',items,next:null,previous:null,count:items.length};
       }
       if (replacePricingGrant) positions=positions.map(p=>p.role==='PRICING_EDITOR'?{...p,grantId:randomUUID()}:p);
       return {revision:'fixture-revision',items:[],next:null,previous:null,count:0};
@@ -172,10 +213,20 @@ test('department login scopes direct reads and writes to the selected live grant
     const supportDiscoveries=await call(origin,'/staff-api/catalogue/discoveries','GET',{cookie:activeCookie});
     assert.equal(supportDiscoveries.status,200);
     assert.equal(JSON.parse(supportDiscoveries.body).items[0].sellingPricePreview,undefined);
+    assert.equal(JSON.parse(supportDiscoveries.body).items[0].acquisitionCost,undefined);
+    assert.deepEqual(JSON.parse(supportDiscoveries.body).items[0].layer1Prices,[customerPrice]);
     assert.equal(catalogueReads,2);
     const manager=await choose('central','TENANT_STAFF_MANAGER');
     assert.equal(manager.status,204);
     const managerCookie=cookie+'; '+manager.headers['set-cookie']![0]!.split(';')[0];
+    const syncPath='/staff-api/catalogue/sync';
+    assert.equal((await call(origin,syncPath,'POST')).status,401);
+    assert.equal((await call(origin,syncPath,'POST',{...headers,cookie:activeCookie})).status,403);
+    assert.equal((await call(origin,syncPath,'POST',{...headers,cookie:managerCookie,'x-csrf-token':'x'.repeat(43)})).status,403);
+    assert.equal((await call(origin,syncPath,'POST',{...headers,cookie:managerCookie,origin:'https://other.invalid'})).status,403);
+    const synced=await call(origin,syncPath,'POST',{...headers,cookie:managerCookie});
+    assert.equal(synced.status,200,synced.body);
+    assert.deepEqual(JSON.parse(synced.body),{products:101,inserted:1,unchanged:100,persisted:true,layer1:{amounts:105,pendingFx:2}});
     const previewPath='/staff-api/catalogue/price-preview';
     const selection={discoveryId};
     const preview=(cookieValue:string,input:unknown,extra={})=>call(origin,previewPath,'POST',
@@ -186,26 +237,55 @@ test('department login scopes direct reads and writes to the selected live grant
     assert.equal((await preview(managerCookie,{...selection,tenantId:randomUUID()})).status,400);
     assert.equal((await preview(managerCookie,{...selection,rate:'1e0'})).status,400);
     assert.equal((await preview(managerCookie,{...selection,senderAmount:'0.01'})).status,400);
-    assert.equal((await preview(managerCookie,{discoveryId:randomUUID()})).status,409);
+    assert.equal((await preview(managerCookie,{discoveryId:randomUUID()})).status,503);
     assert.equal((await preview(managerCookie,{...selection,platformFeeAed:'0.00',commissionAed:'0.00'})).status,400);
     const result=await preview(managerCookie,selection);
-    assert.equal(result.status,200);
-    assert.deepEqual(JSON.parse(result.body),{currency:'AED',basis:'OBSERVED_SENDER_COST_DEMO_FX',senderCurrency:'GBP',
-      senderAmount:'3.17',demoAedRate:'4.70',estimatedCost:'14.90',platformFee:'2.00',commission:'0.50',indicativePrice:'17.40'});
+    assert.equal(result.status,503);
+    assert.deepEqual(JSON.parse(result.body),{code:'AED_NORMALIZATION_UNAVAILABLE',
+      error:'AED acquisition-cost normalization is unavailable during the Layer 1 rebuild.'});
     const catalogue=await Promise.all(['countries?group=GCC','discovery-providers',
       'discoveries?provider=FINXPLOR&sourceCountry=GTM&sourceRegion=Americas&productType=Gift+cards'].map(view=>
       call(origin,'/staff-api/catalogue/'+view,'GET',{cookie:managerCookie,'sec-fetch-site':'same-origin'})));
     assert.deepEqual(catalogue.map(response=>response.status),[200,200,200]);
-    assert.equal(JSON.parse(catalogue[1]!.body).pricingPreviewAvailable,true);
-    assert.equal(JSON.parse(catalogue[2]!.body).items[0].sellingPricePreview,'17.40');
-    assert.equal(JSON.parse(catalogue[2]!.body).items[0].senderAmount,undefined);
+    assert.equal(JSON.parse(catalogue[1]!.body).pricingPreviewAvailable,undefined);
+    assert.deepEqual(JSON.parse(catalogue[2]!.body).items,[
+      {id:discoveryId,providerId:'FINXPLOR',layer1Prices:[customerPrice]},
+      {id:otherDiscoveryId,providerId:'FINXPLOR',layer1Prices:[]},
+      {id:missingCostId,providerId:'SSL_WIRELESS'},
+    ]);
     currentDiscovery=false;
-    assert.equal((await preview(managerCookie,selection)).status,409);
+    assert.equal((await preview(managerCookie,selection)).status,503);
+    const current=await call(origin,'/staff-api/catalogue/discoveries','GET',{cookie:managerCookie});
+    assert.equal(current.status,200);
+    assert.deepEqual(JSON.parse(current.body).items[0],{id:replacedDiscoveryId,providerId:'FINXPLOR',layer1Prices:[]});
     assert.equal((await call(origin,'/staff-api/catalogue/economics','GET',{cookie:managerCookie})).status,403);
     assert.equal(catalogueReads,7);
+    const fxPath='/staff-api/catalogue/refresh-rates';
+    const managerProfile=JSON.parse((await call(origin,'/auth/workspace','GET',{cookie:managerCookie})).body);
+    const supportProfile=JSON.parse((await call(origin,'/auth/workspace','GET',{cookie:activeCookie})).body);
+    assert.equal(managerProfile.canRefreshFxRates,true);
+    assert.equal(supportProfile.canRefreshFxRates,undefined);
+    assert.equal((await call(origin,fxPath,'POST')).status,401);
+    assert.equal((await call(origin,fxPath,'POST',{...headers,cookie:activeCookie})).status,403);
+    assert.equal((await call(origin,fxPath,'POST',{...headers,cookie:managerCookie,'x-csrf-token':'x'.repeat(43)})).status,403);
+    assert.equal((await call(origin,fxPath,'POST',{...headers,cookie:managerCookie,origin:'https://other.invalid'})).status,403);
+    assert.equal(xeRefreshRuns,0);
+    const refreshed=await call(origin,fxPath,'POST',{...headers,cookie:managerCookie});
+    assert.equal(refreshed.status,200,refreshed.body);
+    assert.deepEqual(JSON.parse(refreshed.body),{status:'not-configured'});
+    assert.equal(xeRefreshRuns,1);
     const pricing=await choose('catalogue','PRICING_EDITOR');
     assert.equal(pricing.status,204);
     const pricingCookie=cookie+'; '+pricing.headers['set-cookie']![0]!.split(';')[0];
+    currentDiscovery=true;
+    const pricingDiscoveries=await call(origin,'/staff-api/catalogue/discoveries','GET',{cookie:pricingCookie});
+    assert.equal(pricingDiscoveries.status,200);
+    assert.deepEqual(JSON.parse(pricingDiscoveries.body).items[0].layer1Prices,[customerPrice]);
+    priceStorageDown=true;
+    const pendingPrices=await call(origin,'/staff-api/catalogue/discoveries','GET',{cookie:pricingCookie});
+    assert.equal(pendingPrices.status,200);
+    assert.equal(JSON.parse(pendingPrices.body).items[0].layer1Prices,null);
+    priceStorageDown=false;
     assert.equal((await call(origin,'/staff-api/catalogue/offers','GET',{cookie:pricingCookie})).status,200);
     replacePricingGrant=true;
     assert.equal((await call(origin,'/staff-api/catalogue/offers','GET',{cookie:pricingCookie})).status,403);

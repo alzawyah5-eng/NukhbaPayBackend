@@ -71,5 +71,85 @@
     "name": "local_discovery_scans_009",
     "file": "009_discovery_scans.sql",
     "sha256": "a2cdd69a7e2699c3662c45c41ddf3ff341e21b4e740b517f1d0bd996d887ad5d"
+  },
+  {
+    "name": "local_commercial_draft_evidence_010",
+    "file": "010_commercial_draft_evidence.sql",
+    "sha256": "5df19667a9f0120ca580a719b2ff62934a2fb4620991fb894aea875b3bdda9db"
+  },
+  {
+    "name": "local_discovery_coverage_011",
+    "file": "011_discovery_coverage.sql",
+    "sha256": "0a0432e6e010f8f55af2a8082b084cc6592ec6adc9a7cddd7f41daee2d278e25"
+  },
+  {
+    "name": "local_pricing_review_012",
+    "file": "012_pricing_review.sql",
+    "sha256": "8c193d72f8c88811fe02afd3f3c1111db0d604bf257192807fd3457bebb39bce"
+  },
+  {
+    "name": "local_discovery_confirmations_013",
+    "file": "013_discovery_confirmations.sql",
+    "sha256": "2e083bd954015938ced9dc9e51a57ee60e24077f98f96f5cbf2e2ad8380bdf5c"
+  },
+  {
+    "name": "local_staff_discovery_mapping_status_014",
+    "file": "014_staff_discovery_mapping_status.sql",
+    "sha256": "6f54b5505fac5f2e03cbb53944c9feb50122853dd0b2fe584badd69558a3f5de"
+  },
+  {
+    "name": "local_global_discovery_coverage_015",
+    "file": "015_global_discovery_coverage.sql",
+    "sha256": "0617ed2dbea2cd7067b41daa8c660f4df194a16444f73655ba4b15c8ff11b291"
+  },
+  {
+    "name": "local_acquisition_normalization_016",
+    "file": "016_acquisition_normalization.sql",
+    "sha256": "d50c083317d86441b8b2c2ed734802029c3e013ac97581a56de2c21a552cf5d6"
+  },
+  {
+    "name": "local_finxplor_acquisition_projection_017",
+    "file": "017_finxplor_acquisition_projection.sql",
+    "sha256": "1abdc9b7e41cc8993dac04a2b3e5768a301e783f7a7e86d8ddeda38a993f4931"
+  },
+  {
+    "name": "local_acquisition_exact_valuation_018",
+    "file": "018_acquisition_exact_valuation.sql",
+    "sha256": "a767e8acede210a2525629ec894c7f9a3cb230e7e371c2f7bbfc79419800c432"
+  },
+  {
+    "name": "local_finxplor_customer_price_fx_019",
+    "file": "019_finxplor_customer_price_fx.sql",
+    "sha256": "2c7bf24ea9f4062caa5dfecf67acd522ef1d8bc5578b27e335b5f7c51650c802"
+  },
+  {
+    "name": "local_finxplor_manual_xe_refresh_020",
+    "file": "020_finxplor_manual_xe_refresh.sql",
+    "sha256": "d2aa5f3fdbacf77672096fbfe213b0002e1a30cd57b2df50e24e23b0b8ca83ad"
+  },
+  {
+    "name": "local_finxplor_currency_api_rates_021",
+    "file": "021_finxplor_currency_api_rates.sql",
+    "sha256": "609fe9bdf5d0e0c884b4b6c2b14171e26165d46efc8f3735e81880afc4e2f800"
+  },
+  {
+    "name": "local_finxplor_catalogue_artwork_022",
+    "file": "022_finxplor_catalogue_artwork.sql",
+    "sha256": "5deb29fb5052526f322a5888505ab57cca928a6ccbe4d45b9c9075655f920efe"
+  },
+  {
+    "name": "local_finxplor_resumable_catalogue_023",
+    "file": "023_finxplor_resumable_catalogue.sql",
+    "sha256": "1d6b42bc4f04c68a9b617a78f842b094cab2e9d8b9bfa135899a282cc3f34fd8"
+  },
+  {
+    "name": "local_finxplor_variable_page_coverage_024",
+    "file": "024_finxplor_variable_page_coverage.sql",
+    "sha256": "6dec81b8034e2cc201c8d8e982bbc03b39143339a766ab051560696c02143394"
+  },
+  {
+    "name": "local_finxplor_partial_generation_projection_025",
+    "file": "025_finxplor_partial_generation_projection.sql",
+    "sha256": "ef8700adc7928c912918b88a6eab1d662d18053701563f614ff13ab55d7b3f09"
   }
 ]

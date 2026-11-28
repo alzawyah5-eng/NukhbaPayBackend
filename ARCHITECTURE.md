@@ -1,5 +1,9 @@
 # Nukhbapay: Project Structure and Architecture
 
+See the [catalogue module map](docs/catalogue-platform-structure.md) for the
+current file locations and planned extension points across ingestion, pricing,
+selection, publication and advisory intelligence.
+
 13 November 2026 Brick 4A (ADR 0026): a pure application use case derives immutable versioned DRAFT catalogue candidates from exact accepted snapshots using existing bigint AED pricing. A separate unregistered 007 proposal persists only non-authorized candidate/source/idempotency/event evidence through a disposable restricted role and FORCE RLS. There is no activation, deployed/public read, new permission, live provider or payment path. Brick 3 operational trust remains a prerequisite for any future publication approval.
 
 13 November 2026: ADR 0024 registers the reviewed migration 006 wrapper in source history after ADR 0023's checksummed, locked combined acceptance. Frozen 004/005 and both reviewed SQL sidecars remain unchanged. The guarded runner executes registered 001–006 only on verified random disposable targets; development remains 001–003. Only the IAM reader gains the necessary tokens_valid_after SELECT column, and no mutation credential is introduced. Normal runtime/session/provider modes stay disabled.

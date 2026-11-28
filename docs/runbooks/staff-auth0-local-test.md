@@ -18,6 +18,10 @@ In the Auth0 Development Staff API settings, choose **RFC 9068** under **JSON We
 
 In the Auth0 test Staff application Settings, set **Maximum ID Token Lifetime** to **3600 seconds** or less. The BFF requires a fresh trusted ID token with `amr` containing `mfa`, plus exact issuer, client, nonce, subject and token checks. The API must issue the configured signed human-principal claim. The regular staff login establishes no command-specific MFA assurance. [Auth0 application settings](https://auth0.com/docs/get-started/applications/application-settings)
 
+The Windows local portal can wait up to two seconds when an ordinary sign-in token's signed issue or start time is just ahead of the local clock. It repeats signature and claim verification against the actual clock with zero tolerance. The callback deadline, token expiry and privileged step-up policy still apply. Private diagnostics distinguish future, stale and expired ID tokens with fixed stage names. On 26 November 2026, all 167 focused Auth0 checks passed and the owner confirmed that a fresh real MFA sign-in reached the Catalogue after the update.
+
+If token-time failures recur on the Windows development PC, check Windows Time service status and compare the clock with its configured time source. On 26 November 2026 the workgroup PC was about 0.63 seconds behind `time.windows.com` while Windows Time was stopped with a domain-join trigger. Microsoft documents a network-availability trigger for this workgroup configuration. An administrator can apply that trigger and then verify synchronization against the existing source. [Microsoft Windows Time workgroup guidance](https://learn.microsoft.com/en-us/troubleshoot/windows-client/active-directory/w32time-not-start-on-workgroup)
+
 ## Private process configuration
 
 Supply the following settings in the PowerShell process that starts the app. Use the approved secret store or a hidden prompt for confidential values. Keep values out of files, command history and frontend configuration.

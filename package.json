@@ -18,6 +18,8 @@
     "test": "node --experimental-strip-types --test packages/domain/test/*.test.ts packages/provider-adapters/test/*.test.ts",
     "test:ai": "python3 -m unittest discover -s apps/ai-service/tests -v",
     "check:architecture": "python3 scripts/check_structure.py",
+    "catalogue:import:finxplor-acquisitions": "node scripts/import-finxplor-acquisitions.mjs",
+    "layer1:test:postgres": "node scripts/test/layer1-postgres.mjs",
     "api:build": "pnpm --filter @nukhbapay/api... -r build",
     "api:typecheck": "pnpm --filter @nukhbapay/api typecheck",
     "api:test": "pnpm --filter @nukhbapay/api test",

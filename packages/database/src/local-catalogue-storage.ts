@@ -1,5 +1,5 @@
 import { Pool, type PoolClient } from 'pg';
-import { administrationUuid, type ConfiguredAvailability } from '@nukhbapay/application';
+import { administrationUuid, type ConfiguredAvailability, type FinxplorAcquisitionSummary, type FinxplorLayer1Price } from '@nukhbapay/application';
 import { createStaffCatalogueReader } from './staff-catalogue-reader.js';
 
 /** Restricted read composition for the dedicated Windows development database. */
@@ -59,8 +59,11 @@ export async function createLocalCatalogueStorage(
       try {
         await client.query('SELECT id FROM nukhabapay.products LIMIT 0');
         await client.query('SELECT id,source_id,review_reason FROM nukhabapay.catalogue_discoveries LIMIT 0');
-        await client.query(`SELECT i.discovery_id FROM nukhabapay.catalogue_discovery_scans s
-          JOIN nukhabapay.catalogue_discovery_scan_items i ON i.scan_id=s.id LIMIT 0`);
+        await client.query(`SELECT d.id,d.last_verified_at,m.status
+          FROM nukhabapay.observed_catalogue_discoveries d
+          LEFT JOIN nukhabapay.staff_discovery_mapping_status m
+            ON (m.tenant_id,m.provider_account_id,m.discovery_id)=(d.tenant_id,d.provider_account_id,d.id)
+          LIMIT 0`);
         await client.query(`SELECT c.total_amount_minor,e.candidate_id,a.candidate_id,v.revision,h.occurred_at
           FROM nukhabapay.catalogue_publication_candidates c
           JOIN nukhabapay.price_submission_evidence e USING(candidate_id,tenant_id,product_id)
@@ -97,6 +100,86 @@ export async function createLocalCatalogueStorage(
     } finally { client.release(discard); }
   }
 
+  async function readFinxplorAcquisitions(tenantId: string, discoveryIds: readonly string[]) {
+    const summaries = new Map<string, FinxplorAcquisitionSummary>();
+    if (discoveryIds.length === 0) return summaries;
+    if (closing || !administrationUuid.test(tenantId) || discoveryIds.length > 50 ||
+        discoveryIds.some(id => !administrationUuid.test(id))) throw new Error('Invalid acquisition summary scope');
+    const client = await connect();
+    let discard = false;
+    try {
+      await client.query('BEGIN READ ONLY');
+      await client.query("SELECT set_config('nukhabapay.tenant_id',$1,true)", [tenantId]);
+      const { rows } = await client.query<{
+        discovery_id: string; state: 'QUOTE_REQUIRED' | 'EXPIRED' | 'NORMALIZED';
+        aed_amount: string | null; face_amount: string | null; face_currency: string | null; valid_until: Date | null;
+      }>('SELECT * FROM nukhabapay.staff_finxplor_acquisition_summary($1,$2)', [tenantId, discoveryIds]);
+      for (const row of rows) {
+        const previous = summaries.get(row.discovery_id);
+        if (row.state === 'NORMALIZED' && row.aed_amount && row.face_amount && row.face_currency && row.valid_until) {
+          summaries.set(row.discovery_id, { status: 'NORMALIZED', amounts: [
+            ...(previous?.status === 'NORMALIZED' ? previous.amounts : []),
+            { aedAmount: row.aed_amount, faceAmount: row.face_amount, faceCurrency: row.face_currency,
+              validUntil: row.valid_until.toISOString() },
+          ] });
+        } else if (previous?.status !== 'NORMALIZED' && (row.state === 'QUOTE_REQUIRED' || row.state === 'EXPIRED')) {
+          summaries.set(row.discovery_id, { status: row.state });
+        }
+      }
+      if ((await client.query('COMMIT')).command !== 'COMMIT') throw new Error('Acquisition summary read incomplete');
+      return summaries;
+    } catch {
+      discard = true;
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw new Error('Acquisition summary unavailable');
+    } finally { client.release(discard); }
+  }
+
+  async function readFinxplorLayer1Prices(tenantId: string, discoveryIds: readonly string[]) {
+    const prices = new Map<string, FinxplorLayer1Price[]>();
+    if (!discoveryIds.length) return prices;
+    if (closing || !administrationUuid.test(tenantId) || discoveryIds.length>50 ||
+        discoveryIds.some(id=>!administrationUuid.test(id))) throw new Error('Invalid price scope');
+    const client = await connect();
+    let discard = false;
+    try {
+      await client.query('BEGIN READ ONLY');
+      await client.query("SELECT set_config('nukhabapay.tenant_id',$1,true)", [tenantId]);
+      const {rows} = await client.query<FinxplorLayer1Price & { discoveryId: string }>(`
+        SELECT p.discovery_id AS "discoveryId",p.basis,p.source_key AS "sourceKey",
+          p.source_currency AS "sourceCurrency",p.source_amount::text AS "sourceAmount",
+          CASE WHEN fresh.rate_source IS NOT NULL THEN p.converted_aed::text END AS "convertedAed",
+          fresh.rate_source AS "rateSource"
+        FROM (
+          SELECT p.*,row_number() OVER(PARTITION BY p.discovery_id, (p.basis='CUSTOMER_PRICE')
+            ORDER BY p.source_amount,p.source_key) AS item_number
+          FROM nukhabapay.finxplor_layer1_customer_prices p
+          JOIN nukhabapay.observed_catalogue_discoveries d
+            ON (d.tenant_id,d.provider_account_id,d.id)=(p.tenant_id,p.provider_account_id,p.discovery_id)
+          WHERE p.tenant_id=$1 AND p.discovery_id=ANY($2::uuid[])
+            AND (p.price_valid_until IS NULL OR p.price_valid_until>statement_timestamp())
+        ) p LEFT JOIN nukhabapay.finxplor_customer_fx_rates quote
+          ON (quote.tenant_id,quote.provider_account_id,quote.source_currency,quote.slot_at,quote.retrieved_at)=
+            (p.tenant_id,p.provider_account_id,p.source_currency,p.fx_slot_at,p.fx_retrieved_at)
+        CROSS JOIN LATERAL (
+          SELECT CASE WHEN p.source_currency='AED' THEN 'AED_IDENTITY'
+            WHEN quote.slot_at+interval '12 hours'>statement_timestamp() THEN quote.rate_source END AS rate_source
+        ) fresh
+        WHERE p.item_number<=25 ORDER BY p.discovery_id,p.basis,p.source_amount,p.source_key`, [tenantId,discoveryIds]);
+      for (const {discoveryId,...price} of rows) {
+        const list = prices.get(discoveryId) ?? [];
+        list.push(price);
+        prices.set(discoveryId,list);
+      }
+      if ((await client.query('COMMIT')).command!=='COMMIT') throw new Error('Incomplete price read');
+      return prices;
+    } catch {
+      discard = true;
+      await client.query('ROLLBACK').catch(()=>undefined);
+      throw new Error('Layer 1 price read unavailable');
+    } finally {client.release(discard);}
+  }
+
   const read = createStaffCatalogueReader({ connect }, availability, { localDiscoveries: true });
-  return Object.freeze({ checkReadiness, close, read, hasActiveProviderAccount });
+  return Object.freeze({ checkReadiness, close, read, hasActiveProviderAccount, readFinxplorAcquisitions, readFinxplorLayer1Prices });
 }

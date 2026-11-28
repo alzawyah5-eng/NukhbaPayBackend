@@ -1,3 +1,4 @@
+import {createManualCatalogueSync,createManualFxRefresh} from './manual-catalogue-sync.mjs';
 import {existsSync, lstatSync, readFileSync} from 'node:fs';
 import {createHash} from 'node:crypto';
 import {isAbsolute, resolve} from 'node:path';
@@ -7,7 +8,7 @@ import {createStaffPortal} from '../apps/admin-web/dist/portal.js';
 import {loadBrowserAssets} from '../apps/admin-web/dist/browser-assets.js';
 import {prepareStaffLoginIntegration} from '../apps/admin-web/dist/staff-login-integration.js';
 import {readPendingAuth0Configuration, STAFF_PORTAL_PORT} from '../apps/admin-web/dist/auth0-configuration.js';
-import {administrationUuid, calculateAedPricePreview, createAdministrationAuthority, createStaffAdministration, StaffWorkspaceService} from '../packages/application/dist/application/src/index.js';
+import {administrationUuid, createAdministrationAuthority, createStaffAdministration, StaffWorkspaceService} from '../packages/application/dist/application/src/index.js';
 import {parseIdentityRuntimeConfiguration, createWindowsStaffIdentityRuntime, IdentityRuntimeUnavailableError} from '../packages/database/dist/database/src/identity-runtime.js';
 import {createIdentityReaderPool,createIdentityWriterPool,createLocalCatalogueStorage,createStaffAdministrationReader,createStaffWorkspaceStore} from '../packages/database/dist/database/src/index.js';
 import {createWindowsStaffSessionStore} from '../packages/database/dist/database/src/staff-session-store.js';
@@ -15,19 +16,19 @@ import {verifyWindowsStaffConnection,windowsSessionRole,windowsStaffDatabase,win
 
 const unavailable=()=>new Error('Windows staff portal configuration unavailable');
 const LOCAL_STAFF_SESSION_SECONDS=600;
-function localPricePreview(tenantId,setupId) {
-  const path=new URL('../.local/windows-catalogue-price-preview.json',import.meta.url);
-  if(!existsSync(path))return undefined;
-  try {
-    const file=lstatSync(path);
-    if(!file.isFile()||file.isSymbolicLink()||file.size>2048)return undefined;
-    const {version,tenantId:scope,setupId:target,discoveryId,senderCurrency,senderAmount,demoAedRate}=JSON.parse(readFileSync(path,'utf8'));
-    if(version!==1||scope!==tenantId||target!==setupId||!administrationUuid.test(discoveryId??''))return undefined;
-    const basis=Object.freeze({tenantId,discoveryId,senderCurrency,senderAmount,demoAedRate});
-    calculateAedPricePreview(basis);
-    return basis;
-  }catch{return undefined;}
-}
+// Previous Layer 1 implementation — disabled while rebuilding according to the new approved architecture.
+// function localPricePreviews(tenantId,setupId) {
+//   const path=new URL('../.local/windows-catalogue-price-preview.json',import.meta.url);
+//   if(!existsSync(path))return undefined;
+//   try {
+//     const file=lstatSync(path);
+//     if(!file.isFile()||file.isSymbolicLink()||file.size>2*1024*1024)return undefined;
+//     return readLocalPricePreviewBook(JSON.parse(readFileSync(path,'utf8')),tenantId,setupId);
+//   }catch{
+//     console.warn('Saved AED price previews failed validation.');
+//     return undefined;
+//   }
+// }
 function configuredDiscoveryProviders(env) {
   const path=new URL('../.env',import.meta.url);
   const file=existsSync(path)?lstatSync(path):undefined;
@@ -234,13 +235,15 @@ export async function startWindowsStaffPortal(env=process.env,{preflightOnly=fal
       return;
     }
     stage='HTTPS listener on port 3001';
-    const previewBasis=catalogue && isolatedCataloguePreview ? localPricePreview(auth.tenantId,setupId) : undefined;
-    if(previewBasis)console.info('Saved provider sender cost loaded for the local AED preview.');
+    // Previous Layer 1 implementation — disabled while rebuilding according to the new approved architecture.
+    // const previewBook=catalogue && isolatedCataloguePreview ? localPricePreviews(auth.tenantId,setupId) : undefined;
+    // if(previewBook)console.info(`Loaded ${previewBook.prices.size} saved AED price previews.`);
     portal=await createStaffPortal({pfx,certificate,passphrase,port:STAFF_PORTAL_PORT,browserAssets,environment:{NODE_ENV:'development'},
       sessions:integration.sessions,login:integration.login,staffManagement:staffAdministration,staffWorkspace,
-      ...(staffCatalogue && {staffCatalogue}),
+      ...(staffCatalogue && {staffCatalogue,syncCatalogue:createManualCatalogueSync(auth.tenantId),
+        refreshFxRates:createManualFxRefresh(auth.tenantId)}),
+      ...(catalogue && {finxplorLayer1Prices:catalogue.readFinxplorLayer1Prices}),
       ...(staffCatalogue && isolatedCataloguePreview && {localCataloguePreview:true}),
-      ...(previewBasis && {localPricePreview:previewBasis}),
       departmentAccess:staffWorkspace,windowsStaffStorageReady:ready});
     let closing;
     return Object.freeze({origin:portal.origin,close:()=>closing??=close()});

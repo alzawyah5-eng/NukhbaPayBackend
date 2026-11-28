@@ -1,4 +1,11 @@
-# Synthetic catalog import
+# Catalogue ingestion
+
+Catalogue ingestion preserves provider observations and source versions for
+review. The downstream [matching boundary](matching/README.md) produces
+candidate links for review. Approved links feed FX, pricing and selection. The
+[publication boundary](publication/README.md) consumes selected offers and
+serves a versioned catalogue through scoped API reads. These links describe
+module ownership alongside the existing synthetic import example below.
 
 `importSyntheticCatalogProvider` fetches one complete synthetic provider snapshot and delegates it to the narrow `CatalogImportRepository` port. `readSyntheticProviderSnapshot` exposes an internal read operation. The PostgreSQL repository is implemented in `packages/database`; no customer-facing route is registered.
 

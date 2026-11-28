@@ -101,7 +101,7 @@ function digest(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
-function financialPolicyRecord(policy: PricingPolicy): readonly unknown[] {
+export function financialPolicyRecord(policy: PricingPolicy): readonly unknown[] {
   return Object.freeze([
     requiredText(policy.version, "pricingPolicy.version"),
     policy.serviceFeeMinor.toString(), policy.maximumServiceFeeMinor.toString(), policy.taxAmountMinor.toString(),

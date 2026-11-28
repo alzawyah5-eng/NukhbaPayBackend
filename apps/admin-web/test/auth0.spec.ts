@@ -31,6 +31,33 @@ test('private callback diagnostics report a fixed stage and preserve the public 
   } finally { login.close(); f.login.close(); }
 });
 
+test('local sign-in waits for the signed time boundary and rejects timestamps outside its wait limit', async () => {
+  const local = await fixture(config.callbackUrl, {localSessionLifetimeSeconds:600});
+  local.advance(850);
+  const now = Math.floor(local.now().getTime()/1000);
+  const near = now+1;
+  local.id({iat:near,auth_time:near});
+  local.access({iat:near});
+  const started = local.begin();
+  const pending = local.login.complete(started.callback,started.cookie);
+  try {
+    await new Promise(resolve=>setTimeout(resolve,25));
+    assert.equal(local.rows.size,0);
+    local.advance(150);
+    assert.equal((await local.sessions.validate(await pending)).ok,true);
+    assert.equal(local.exchanges(),1);
+  } finally { local.login.close(); }
+
+  const outside = await fixture(config.callbackUrl, {localSessionLifetimeSeconds:600});
+  try {
+    const tooFar = Math.floor(outside.now().getTime()/1000)+3;
+    outside.id({iat:tooFar,auth_time:tooFar});
+    const attempt = outside.begin();
+    await assert.rejects(outside.login.complete(attempt.callback,attempt.cookie),{message:'Staff authentication failed'});
+    assert.equal(outside.rows.size,0);
+  } finally { outside.login.close(); }
+});
+
 test('normal reauthentication recovers an expired prior session and fails closed on an unavailable store', async () => {
   const expired=await fixture();
   const first=expired.begin(), old=await expired.login.complete(first.callback,first.cookie);

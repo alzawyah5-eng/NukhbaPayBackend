@@ -65,7 +65,7 @@ function validateIdentity(identity: ProductIdentity): void {
   if (identity.faceValueMinor === 0n) throw new TypeError("Product face value must be positive");
 }
 
-function validatePolicy(policy: PricingPolicy): void {
+export function validatePricingPolicy(policy: PricingPolicy): void {
   if (typeof policy.version !== "string" || !policy.version.trim()) throw new TypeError("Policy version is required");
   for (const name of ["serviceFeeMinor", "maximumServiceFeeMinor", "taxAmountMinor", "paymentFixedFeeMinor", "agentCommissionMinor", "minimumContributionMinor"] as const) {
     assertMinorAmount(policy[name], name);
@@ -112,7 +112,7 @@ function offerRejection(offer: ProviderOffer, product: ProductIdentity, policy: 
 /** Pure comparison. The caller supplies time; no I/O or model output can alter the calculation. */
 export function selectOffer(product: ProductIdentity, offers: readonly ProviderOffer[], policy: PricingPolicy, now: string) {
   validateIdentity(product);
-  validatePolicy(policy);
+  validatePricingPolicy(policy);
   const nowMs = pricingInstantMs(now, "now");
   const eligible: ProviderOffer[] = [];
   const rejections: OfferRejection[] = [];

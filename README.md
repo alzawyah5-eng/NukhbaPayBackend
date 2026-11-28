@@ -171,6 +171,7 @@ Deployment and operational acceptance are separate from commit validation.
 ## 🔒 Security Runbooks & Documentation
 
 - [Architecture Overview](ARCHITECTURE.md)
+- [Catalogue Architecture and Module Map](docs/catalogue-platform-structure.md)
 - [Project Inventory & Structure](docs/project-structure.md)
 - [Verification Evidence & Limits](docs/verification.md)
 - [ADR Index (Decisions 0001–0026)](docs/adr/)

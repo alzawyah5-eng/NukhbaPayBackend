@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import type { Pool } from 'pg';
+import { readLocalDiscoveryPage } from './local-discovery-page.js';
 import {
-  administrationUuid, consumeStaffCatalogueRead, type ConfiguredAvailability,
+  AdministrationError, administrationUuid, consumeStaffCatalogueRead, type ConfiguredAvailability,
   type StaffCatalogueReadTicket, type StaffCatalogueSnapshot,
 } from '@nukhbapay/application';
 
@@ -29,9 +30,9 @@ export function createStaffCatalogueReader(
     consumeStaffCatalogueRead(ticket);
     const tenant = ticket.tenantId;
     if (!administrationUuid.test(tenant) || !configuration.has(tenant) || !await ticket.revalidate()) {
-      throw new Error('Catalogue read denied');
+      throw new AdministrationError(403);
     }
-    const client = await pool.connect().catch(() => { throw new Error('Catalogue reader unavailable'); });
+    const client = await pool.connect().catch(() => { throw new AdministrationError(503); });
     let discard = false;
     let committing = false;
     let committed = false;
@@ -133,41 +134,8 @@ export function createStaffCatalogueReader(
         WHERE v.tenant_id=$1 ORDER BY v.revision DESC,v.operation_id LIMIT $2`,scope)).rows.map(row => ({
         id:row.id,productId:row.product_id,revision:row.revision,action:row.kind,occurredAt:row.occurred_at.toISOString(),
       })) : [];
-      const discoveries: NonNullable<Snapshot['discoveries']> = ticket.view === 'discoveries' && options.localDiscoveries
-        ? (await client.query<{
-          id: string; provider_code: string; source_id: string; product_name: string; brand: string;
-          source_country: string; currency: string; category: string; delivery: string; observed_at: Date;
-          denominations: string[]; min_amount: string; max_amount: string;
-          review_reason: NonNullable<Snapshot['discoveries']>[number]['reviewReason'];
-        }>(`WITH latest_scans AS (
-          SELECT DISTINCT ON (provider_account_id) tenant_id,provider_account_id,id,completed_at
-          FROM nukhabapay.catalogue_discovery_scans WHERE tenant_id=$1
-          ORDER BY provider_account_id,completed_at DESC,id DESC
-        ), current_discoveries AS (
-          SELECT i.tenant_id,i.provider_account_id,i.discovery_id,s.completed_at AS observed_at
-          FROM latest_scans s JOIN nukhabapay.catalogue_discovery_scan_items i
-            ON (i.tenant_id,i.provider_account_id,i.scan_id)=(s.tenant_id,s.provider_account_id,s.id)
-          UNION ALL
-          SELECT * FROM (
-            SELECT DISTINCT ON (d.provider_account_id,d.source_id) d.tenant_id,d.provider_account_id,d.id,d.observed_at
-            FROM nukhabapay.catalogue_discoveries d WHERE d.tenant_id=$1 AND NOT EXISTS (
-              SELECT 1 FROM latest_scans s WHERE s.provider_account_id=d.provider_account_id
-            ) ORDER BY d.provider_account_id,d.source_id,d.observed_at DESC,d.id DESC
-          ) legacy
-        )
-          SELECT d.id,a.provider_code,d.source_id,d.product_name,d.brand,d.source_country,d.currency,d.category,
-          d.delivery,c.observed_at,d.denominations,d.min_amount,d.max_amount,d.review_reason
-          FROM current_discoveries c JOIN nukhabapay.catalogue_discoveries d
-            ON (d.tenant_id,d.provider_account_id,d.id)=(c.tenant_id,c.provider_account_id,c.discovery_id)
-          JOIN nukhabapay.provider_accounts a
-            ON (a.tenant_id,a.id)=(d.tenant_id,d.provider_account_id)
-          WHERE d.tenant_id=$1
-          ORDER BY d.provider_account_id,d.source_id,d.id LIMIT $2`, scope)).rows.map(r => ({
-          id:r.id,providerId:r.provider_code,sourceId:r.source_id,name:r.product_name,brand:r.brand,
-          sourceCountry:r.source_country,currency:r.currency,category:r.category,delivery:r.delivery,
-          observedAt:r.observed_at.toISOString(),denominations:r.denominations,minAmount:r.min_amount,maxAmount:r.max_amount,
-          reviewReason:r.review_reason,
-        })) : [];
+      const localPage = ticket.discoveryPage && options.localDiscoveries
+        ? await readLocalDiscoveryPage(client, tenant, ticket.discoveryPage) : undefined;
 
       const discoveryProviderIds = ticket.view==='discovery-providers' && options.localDiscoveries
         ? (await client.query<{provider_code:string}>(`SELECT DISTINCT a.provider_code
@@ -176,22 +144,23 @@ export function createStaffCatalogueReader(
           WHERE d.tenant_id=$1 ORDER BY a.provider_code LIMIT $2`,scope)).rows.map(row=>row.provider_code)
         : [];
       const data: Snapshot = { tenantId: tenant, availability, products, offers, imports,
-        drafts, publications, storedEconomics, proposals: [], ...(options.localDiscoveries && { discoveries, discoveryProviderIds }) };
+        drafts, publications, storedEconomics, proposals: [], ...(options.localDiscoveries && { discoveryProviderIds }),
+        ...(localPage && { discoveries:localPage.discoveries,discoveryPage:localPage.discoveryPage }) };
       const revision = createHash('sha256')
-        .update(JSON.stringify(data, (_, value: unknown) => typeof value === 'bigint' ? value.toString() : value))
+        .update(localPage?.revisionSeed ?? JSON.stringify(data, (_, value: unknown) => typeof value === 'bigint' ? value.toString() : value))
         .digest('hex');
-      if (!await ticket.revalidate()) throw new Error('Catalogue read denied');
+      if (!await ticket.revalidate()) throw new AdministrationError(403);
       committing = true;
       if ((await client.query('COMMIT')).command!=='COMMIT') throw new Error('Catalogue read incomplete');
       committed = true;
-      if (!await ticket.revalidate()) throw new Error('Catalogue read denied');
+      if (!await ticket.revalidate()) throw new AdministrationError(403);
       return { ...data, revision };
-    } catch {
+    } catch (error) {
       discard = committing && !committed;
       if (!committed) {
         try { await client.query('ROLLBACK'); } catch { discard = true; }
       }
-      throw new Error('Catalogue reader unavailable');
+      throw error instanceof AdministrationError ? error : new AdministrationError(503);
     } finally {
       client.release(discard);
     }

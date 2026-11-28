@@ -8,12 +8,20 @@ import {SOURCE_GEOGRAPHY} from './source-geography.js';
 import {reviewHybridPricing,type HybridPricingEvidence} from './hybrid-pricing.js';
 export type StaffCatalogueView='countries'|'services'|'providers'|'products'|'offers'|'economics'|'imports'|'drafts'|'publications'|'discoveries'|'discovery-providers';
 export interface ConfiguredAvailability {readonly country:string;readonly service:string;readonly providerId:string;readonly enabled:boolean;}
-interface StaffCatalogueDiscovery {
+export interface StaffCatalogueDiscovery {
   readonly id:string;readonly providerId:string;readonly sourceId:string;
   readonly name:string;readonly brand:string;readonly sourceCountry:string;readonly currency:string;
   readonly category:string;readonly delivery:string;readonly observedAt:string;
   readonly reviewReason:'OUTSIDE_PRICED_CATALOGUE_SCOPE'|'CANONICAL_MAPPING_REQUIRED';
   readonly denominations:readonly string[];readonly minAmount:string;readonly maxAmount:string;
+  readonly coverageScope?:string|null;
+  readonly imageUrl?:string|null;
+  readonly mappingStatus?:'PROPOSED'|'APPROVED'|'REJECTED'|null;
+}
+export interface StaffDiscoveryPageRequest {
+  readonly provider?:string|undefined;readonly country?:string|undefined;readonly region?:readonly string[]|undefined;
+  readonly excludeRegion:boolean;readonly productType?:string|undefined;readonly search?:string|undefined;readonly discoveryId?:string|undefined;
+  readonly sortByName:boolean;readonly limit:number;readonly anchor?:string|undefined;readonly reverse:boolean;
 }
 export type StoredStaffEconomics = Pick<DraftPublicationCandidate, 'productId' | 'candidateId' |
   'selectedProviderId' | 'totalAmountMinor' | 'providerCostMinor' | 'serviceFeeMinor' |
@@ -27,12 +35,15 @@ export interface StaffCatalogueSnapshot {
   readonly hybridPricingEvidence?:readonly HybridPricingEvidence[];
   readonly storedEconomics?: readonly StoredStaffEconomics[];
   readonly discoveries?: readonly StaffCatalogueDiscovery[];
+  readonly discoveryPage?: {readonly count:number;readonly countries:readonly string[];readonly types:readonly string[];
+    readonly more:boolean;readonly partial?:boolean};
   readonly discoveryProviderIds?: readonly string[];
   readonly imports:readonly {id:string;providerId:string;status:'COMPLETE'|'IN_PROGRESS'|'FAILED';observedAt:string}[];
   readonly publications?:readonly {id:string;productId:string;revision:string;action:'ACTIVATE'|'ROLLBACK';occurredAt:string}[];
   readonly drafts:readonly {id:string;productId:string;version:number;status:'DRAFT'|'SUBMITTED'|'APPROVED'|'PUBLISHED'}[];
 }
-export interface StaffCatalogueReadTicket {readonly tenantId:string;readonly view:StaffCatalogueView;revalidate():Promise<boolean>;}
+export interface StaffCatalogueReadTicket {readonly tenantId:string;readonly view:StaffCatalogueView;
+  readonly discoveryPage?:StaffDiscoveryPageRequest;revalidate():Promise<boolean>;}
 const tickets=new WeakSet<object>();
 export function consumeStaffCatalogueRead(ticket:StaffCatalogueReadTicket){if(!tickets.delete(ticket))throw new AdministrationError(403);return ticket;}
 const hash=(v:unknown)=>createHash('sha256').update(JSON.stringify(v)).digest('hex');
@@ -88,7 +99,18 @@ export class StaffCatalogueService {
     }
     const revalidate = async () => await lease.revalidate() && (!pricing || await pricing.revalidate());
     if (!await revalidate()) throw new AdministrationError(403);
-    const ticket=Object.freeze({tenantId,view,revalidate});tickets.add(ticket);
+    const binding=hash([lease.staffId,tenantId,view,Object.entries(q).filter(([k])=>k!=='cursor').sort()]);
+    const cursor=q['cursor']?this.#cursors.get(q['cursor']):undefined;
+    if(q['cursor']&&(!cursor||cursor.binding!==binding||this.deps.now().getTime()>=cursor.expires))throw new AdministrationError(409);
+    const search=q['search']?.normalize('NFKC').toLowerCase().trim();
+    const region=q['sourceRegion'];
+    const discoveryPage:StaffDiscoveryPageRequest|undefined=view==='discoveries'?Object.freeze({
+      provider:q['provider'],country:q['sourceCountry'],productType:q['productType'],search,discoveryId:q['discoveryId'],
+      region:region?Object.freeze(Object.entries(SOURCE_GEOGRAPHY).filter(([,geography])=>region==='Other'||
+        geography[1]===region).map(([code])=>code)):undefined,excludeRegion:region==='Other',sortByName:q['sort']==='name',
+      limit,anchor:cursor?.anchor,reverse:cursor?.direction==='previous',
+    }):undefined;
+    const ticket=Object.freeze(discoveryPage?{tenantId,view,revalidate,discoveryPage}:{tenantId,view,revalidate});tickets.add(ticket);
     let snapshot:StaffCatalogueSnapshot;try{snapshot=await this.deps.read(ticket);}finally{tickets.delete(ticket);}
     if(snapshot.tenantId!==tenantId||!text(snapshot.revision)||[snapshot.availability,snapshot.products,snapshot.offers,snapshot.proposals,snapshot.imports,snapshot.drafts,snapshot.publications??[],snapshot.storedEconomics??[],snapshot.discoveries??[],snapshot.discoveryProviderIds??[],snapshot.hybridPricingEvidence??[]].some(rows=>!Array.isArray(rows)||rows.length>1000))throw new AdministrationError(503);
     const seen=new Set<string>();
@@ -175,10 +197,14 @@ export class StaffCatalogueService {
         sourceCountryName:market.name,sourceCountryCode:SOURCE_GEOGRAPHY[r.sourceCountry]?.[0]??null,
         sourceRegion:market.region,productType:discoveryProductType(r.category),mappingBlockers:Object.freeze(mappingBlockers),
         denominations:Object.freeze([...r.denominations]),minAmount:r.minAmount,maxAmount:r.maxAmount,
+        ...(r.providerId==='FINXPLOR' && typeof r.imageUrl==='string' && r.imageUrl.length<=2048 &&
+          /^https:\/\/finxplorconnect[.]com\/api\/v1\/media\/[A-Za-z0-9_+\/=-]+$/.test(r.imageUrl) && {imageUrl:r.imageUrl}),
         status:r.reviewReason==='OUTSIDE_PRICED_CATALOGUE_SCOPE'?'DISCOVERY_ONLY':'REVIEW_REQUIRED',
-        reviewReason:r.reviewReason,pricing:'UNVERIFIED',
+        reviewReason:r.reviewReason,pricing:'UNVERIFIED',...(r.coverageScope!==undefined&&{coverageScope:r.coverageScope}),
         pricingReview:Object.freeze({
-          matching:r.reviewReason==='OUTSIDE_PRICED_CATALOGUE_SCOPE'?'OUTSIDE_SCOPE':'NEEDS_CANONICAL_MATCH',
+          matching:r.reviewReason==='OUTSIDE_PRICED_CATALOGUE_SCOPE'?'OUTSIDE_SCOPE':
+            r.mappingStatus==='APPROVED'?'CANONICAL_MATCH_APPROVED':'NEEDS_CANONICAL_MATCH',
+          ...(r.mappingStatus!==undefined&&{mappingStatus:r.mappingStatus}),
           state:'AWAITING_VERIFIED_TERMS',salePrice:null,
         })});
     });
@@ -192,14 +218,16 @@ export class StaffCatalogueService {
       return Object.freeze({id:r.id,productId:r.productId,revision:r.revision,action:r.action,occurredAt:r.occurredAt});
     });
     else rows=snapshot.drafts.filter(r=>!q['product']||r.productId===q['product']).map(r=>{if(!/^[0-9a-f]{64}$/.test(r.id)||!products.some(p=>p.id===r.productId)||!Number.isSafeInteger(r.version)||r.version<1||!['DRAFT','SUBMITTED','APPROVED','PUBLISHED'].includes(r.status))throw new AdministrationError(503);return Object.freeze({id:r.id,productId:r.productId,version:r.version,status:r.status});});
-    const sourceCountries=view==='discoveries' ? Object.freeze([...new Set(rows.map(r=>String(r['sourceCountry'])))].sort()) : undefined;
+    const paged=snapshot.discoveryPage;
+    if(paged&&(view!=='discoveries'||rows.length>limit||!Number.isSafeInteger(paged.count)||paged.count<rows.length))throw new AdministrationError(503);
+    const sourceCountries=view==='discoveries' ? Object.freeze([...(paged?.countries??
+      new Set(rows.map(r=>String(r['sourceCountry']))))].sort()) : undefined;
     const sourceMarkets=sourceCountries?.map(sourceMarket).sort((a,b)=>a.name.localeCompare(b.name,'en'));
-    const productTypes=view==='discoveries' ? [...new Set(rows.map(r=>String(r['productType'])))].sort() : undefined;
-    const search=q['search']?.normalize('NFKC').toLowerCase().trim();
-    const sortKey=(r:typeof rows[number])=>view==='publications'&&q['sort']===undefined
+    const productTypes=view==='discoveries' ? [...(paged?.types??new Set(rows.map(r=>String(r['productType']))) )].sort() : undefined;
+    const sortKey=(r:typeof rows[number])=>paged?r.id:view==='publications'&&q['sort']===undefined
       ? String(9223372036854775807n-BigInt(String(r['revision']))).padStart(19,'0')+r.id : q['sort']==='name'?`${String(r.name??r.id).normalize('NFKC').toLowerCase()}\0${r.id}`:r.id;
     const discoverySearchFields=['name','brand','sourceId','providerId','sourceCountry','currency','category','delivery'];
-    rows=rows.filter(r=>{
+    if(!paged) rows=rows.filter(r=>{
       if(q['discoveryId'] && r.id!==q['discoveryId'])return false;
       if(q['sourceCountry'] && r['sourceCountry']!==q['sourceCountry'])return false;
       if(q['sourceRegion'] && r['sourceRegion']!==q['sourceRegion'])return false;
@@ -214,15 +242,16 @@ export class StaffCatalogueService {
       });
     }).slice().sort((a,b)=>sortKey(a)<sortKey(b)?-1:sortKey(a)>sortKey(b)?1:0);
     if(new Set(rows.map(r=>r.id)).size!==rows.length)throw new AdministrationError(503);
-    const binding=hash([lease.staffId,tenantId,view,Object.entries(q).filter(([k])=>k!=='cursor').sort()]),cursor=q['cursor']?this.#cursors.get(q['cursor']):undefined;
     let start=0,end=limit;
     if(q['cursor']){
       if(!cursor||cursor.binding!==binding||cursor.revision!==snapshot.revision||now>=cursor.expires)throw new AdministrationError(409);
-      const anchor=rows.findIndex(row=>sortKey(row)===cursor.anchor);
-      if(anchor<0)throw new AdministrationError(409);
       this.#cursors.delete(q['cursor']);
-      if(cursor.direction==='next'){start=anchor+1;end=start+limit;}
-      else{end=anchor;start=Math.max(0,end-limit);}
+      if(!paged){
+        const anchor=rows.findIndex(row=>sortKey(row)===cursor.anchor);
+        if(anchor<0)throw new AdministrationError(409);
+        if(cursor.direction==='next'){start=anchor+1;end=start+limit;}
+        else{end=anchor;start=Math.max(0,end-limit);}
+      }
     }
     const items=Object.freeze(rows.slice(start,end));
     if (!await revalidate()) throw new AdministrationError(403);
@@ -230,16 +259,18 @@ export class StaffCatalogueService {
     if (!await revalidate()) throw new AdministrationError(403);
     const finalNow=this.deps.now().getTime();
     for(const [key,value] of this.#cursors)if(finalNow>=value.expires)this.#cursors.delete(key);
-    const hasPrevious=start>0&&items.length>0,hasNext=end<rows.length&&items.length>0;
+    const hasPrevious=items.length>0&&(paged?(cursor?.direction==='previous'?paged.more:Boolean(cursor)):start>0);
+    const hasNext=items.length>0&&(paged?(cursor?.direction==='previous'||paged.more):end<rows.length);
     if(this.#cursors.size+Number(hasPrevious)+Number(hasNext)>1000)throw new AdministrationError(503);
     const issueCursor=(row:typeof rows[number],direction:'next'|'previous')=>{
       const id=randomBytes(32).toString('hex');
       this.#cursors.set(id,{binding,revision:snapshot.revision,anchor:sortKey(row),direction,expires:Math.min(finalNow+60000,identity.security.expiresAt*1000)});
       return id;
     };
-    return Object.freeze({revision:snapshot.revision,items,count:rows.length,
+    return Object.freeze({revision:snapshot.revision,items,count:paged?.count??rows.length,
       ...(view==='discovery-providers'&&{hasConfiguredServices:snapshot.availability.some(row=>row.enabled)}),
       next:hasNext?issueCursor(items.at(-1)!,'next'):null,previous:hasPrevious?issueCursor(items[0]!,'previous'):null,
-      ...(sourceCountries && {sourceCountries,sourceMarkets,productTypes})});
+      ...(sourceCountries && {sourceCountries,sourceMarkets,productTypes}),
+      ...(paged?.partial===true && {catalogueCoverage:'PARTIAL'})});
   }
 }

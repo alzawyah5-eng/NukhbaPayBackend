@@ -52,3 +52,4 @@ export * from './staff-catalogue-reader.js';
 export { createLocalCatalogueStorage } from './local-catalogue-storage.js';
 export { createDisposablePlatformStaffExecutor, DISPOSABLE_PLATFORM_STAFF_EFFECT, AUTH0_PLATFORM_STAFF_PILOT } from './platform-staff-executor.js';
 export type { PlatformStaffIntent, VerifiedPlatformStaffAssurance } from './platform-staff-executor.js';
+export * from './layer1-acquisition-store.js';

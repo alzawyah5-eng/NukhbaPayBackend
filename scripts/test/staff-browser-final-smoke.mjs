@@ -27,7 +27,7 @@ async function until(work, description, timeoutMs=10000) {
   throw new Error(description,{cause:lastError});
 }
 
-test('existing React workspace completes catalogue loading and protected command forms in a Chromium browser',async()=>{
+test('existing React workspace completes catalogue loading and protected command forms in a Chromium browser',async t=>{
   const root=path.resolve('.local');
   await mkdir(root,{recursive:true});
   const assets=loadBrowserAssets(path.resolve('apps/admin-web/dist/client'));
@@ -38,11 +38,13 @@ test('existing React workspace completes catalogue loading and protected command
   let command='STEP_UP_REQUIRED',reviewDecision,expired=false,privatePrice='permitted',publicationAction;
   let loginEnabled=false,staffEnabled=true,configuredCatalogue=false;
   let discoveryPaginationExpired=false;
+  let fxRuns=0, convertedFixturePrice='16.24135802116804';
   const server=createServer((req,res)=>{
     const url=new URL(req.url,'http://127.0.0.1');
     fixtureRequests.add(url.pathname);
     const reply=(status,body)=>{res.writeHead(status,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify(body));};
     if (url.pathname==='/auth/workspace') {reply(expired?401:200,{csrfToken:key,staffId:actor,tenantId:tenant,expiresAtMs:Date.now()+60000,
+      ...(staffEnabled && {canRefreshFxRates:true}),
       navigation:staffEnabled?['/overview','/staff','/audit','/catalogue','/staff/commands','/catalogue/publication']:['/overview']});return;}
     if (url.pathname==='/auth/config') {reply(200,{loginPath:loginEnabled?'/auth/login':null});return;}
     if (url.pathname==='/auth/login') {reply(200,{surface:'fixture login handoff'});return;}
@@ -54,15 +56,17 @@ test('existing React workspace completes catalogue loading and protected command
     }
     if (url.pathname.startsWith('/staff-api/catalogue/')) {
       const view=url.pathname.split('/').pop();
+      if (view==='refresh-rates' && req.method==='POST') {
+        assert.equal(req.headers['x-csrf-token'],key);
+        if (++fxRuns===1) reply(200,{status:'not-configured'});
+        else setTimeout(()=>{
+          convertedFixturePrice='19.02';
+          reply(200,{status:'completed',ratesFetched:1,converted:1,pending:0,failedCurrencies:0});
+        },600);
+        return;
+      }
       if (view==='price-preview' && req.method==='POST') {
-        let body='';
-        req.on('data',chunk=>{body+=chunk;});
-        req.on('end',()=>{
-          assert.equal(req.headers['x-csrf-token'],key);
-          assert.deepEqual(JSON.parse(body),{discoveryId:'sandbox-discovery'});
-          reply(200,{currency:'AED',basis:'OBSERVED_SENDER_COST_DEMO_FX',senderCurrency:'GBP',
-            senderAmount:'3.17',demoAedRate:'4.70',estimatedCost:'14.90',platformFee:'2.00',commission:'0.50',indicativePrice:'17.40'});
-        });
+        reply(503,{code:'AED_NORMALIZATION_UNAVAILABLE',error:'AED cost normalization is unavailable'});
         return;
       }
       const page=(items=[],next=null,previous=null,count=items.length,extra={})=>reply(200,{revision:'browser-v1',items,next,previous,count,...extra});
@@ -71,12 +75,12 @@ test('existing React workspace completes catalogue loading and protected command
           {name:'List products',method:'GET',path:'/api/v1/products',verification:'Sandbox imported'},
           {name:'Get product details',method:'GET',path:'/api/v1/products/:productId',verification:'Mock verified'},
         ]},{id:'IPAY',name:'iPay / Qore3',hasDiscoveries:false}],null,null,2,
-        {hasConfiguredServices:configuredCatalogue,pricingPreviewAvailable:true});return;
+        {hasConfiguredServices:configuredCatalogue,pricingPreviewAvailable:false,normalizationStatus:'AED_NORMALIZATION_UNAVAILABLE'});return;
       }
       if (view==='discoveries') {
         assert.ok(url.searchParams.has('provider'));
         if(url.searchParams.get('provider')!=='FINXPLOR'){page([],null,null,0,{sourceMarkets:[],productTypes:[]});return;}
-        const extra={sourceMarkets:[{id:'GTM',name:'Guatemala',region:'Americas'},
+        const extra={catalogueCoverage:'PARTIAL',sourceMarkets:[{id:'GTM',name:'Guatemala',region:'Americas'},
           {id:'ARE',name:'United Arab Emirates',region:'GCC'}],productTypes:['Gift cards','Mobile recharge']};
         const item={id:'sandbox-discovery',name:'Sandbox discovery fixture',providerId:'FINXPLOR',brand:'Airtel Bangladesh',
           sourceCountry:'GTM',category:'Gift Card',delivery:'email',minAmount:'0.00',maxAmount:'25.00',currency:'USD',
@@ -94,7 +98,13 @@ test('existing React workspace completes catalogue loading and protected command
           page([last],null,previousCursor,21,extra);return;
         }
         const limit=Number(url.searchParams.get('limit'));
-        const rows=[{...item,sellingPricePreview:'17.40'},...Array.from({length:19},(_,n)=>({...item,id:'discovery-'+n,name:'Additional product '+n})),last];
+        const rows=[{...item,layer1Prices:[
+          {basis:'CUSTOMER_PRICE',sourceKey:'fixture-price',sourceAmount:'3.17',sourceCurrency:'GBP',
+            convertedAed:convertedFixturePrice,rateSource:'CURRENCY_API'},
+        ]},...Array.from({length:19},(_,n)=>({...item,layer1Prices:[
+          {basis:'DENOMINATION',sourceKey:'fixture-face',sourceAmount:'25.00',sourceCurrency:'USD',
+            convertedAed:null,rateSource:null},
+        ],id:'discovery-'+n,name:'Additional product '+n,...(n===0&&{brand:'Amazon UAE'}),...(n===1&&{currency:'INR',minAmount:'0',maxAmount:'0',layer1Prices:[]})})),last];
         page(rows.slice(0,limit),limit<rows.length?cursor:null,null,rows.length,extra);return;
       }
       if (view==='countries') {
@@ -233,21 +243,38 @@ test('existing React workspace completes catalogue loading and protected command
     assert.equal(await run("document.querySelector('select option:checked[value=FINXPLOR]')?.value"),'FINXPLOR');
     assert.equal(fixtureRequests.has('/staff-api/catalogue/countries'),false);
     assert.equal(await run("document.body.textContent.includes('Finxplor API functions') || document.body.textContent.includes('/api/v1/products/:productId')"),false);
+    await until(()=>run("document.querySelector('img[alt=\"Amazon UAE logo\"]')?.naturalWidth>0"),
+      'Reviewed Amazon brand artwork did not load');
+    await visible('Full account coverage awaits a confirmed final page.');
     await visible('Provider denomination');
-    await visible('Selling price');
-    await visible('Outside pricing scope');
+    await visible('Amount required INR');
+    await visible('Provider customer price');
+    await visible('Converted AED price');
+    await visible('3.17 GBP');
+    await visible('AED 16.24135802116804');
+    await t.test('Exchange-rate refresh sits beside Sign out, reports configuration and reloads AED prices',async()=>{
+      assert.deepEqual(await run("[...document.querySelectorAll('.topbar-actions button')].map(b=>b.textContent.trim())"),
+        ['Refresh exchange rates','Sign out']);
+      await click('Refresh exchange rates');
+      await visible('Exchange-rate refresh is unavailable until the Currency API key is configured.');
+      await click('Refresh exchange rates');
+      await until(()=>run("[...document.querySelectorAll('.topbar-actions button')].some(b=>b.disabled && b.textContent.includes('Refreshing exchange rates'))"),
+        'Refresh button was not disabled while processing');
+      await visible('Saved 1 new exchange rates.');
+      await visible('AED 19.02');
+      assert.equal(fxRuns,2);
+    });
+    await visible('Finxplor has not supplied a customer price.');
+    await visible('Provider face value');
+    await visible('Awaiting exchange rate');
+    assert.equal(await run("[...document.querySelectorAll('.catalogue-product-card button')].filter(button=>button.textContent==='Preview AED price').length"),0);
     await visible('0.00–25.00 USD');
     await visible('20 Nov 2026, 21:00');
     await visible('Discovery only');
     await visible('Outside priced coverage for Guatemala · USD');
-    await visible('Airtel Bangladesh');await visible('AED 17.40');await visible('Demo estimate');
+    await visible('Airtel Bangladesh');
+    assert.equal(await run("document.body.textContent.includes('AED 17.40')"),false);
     assert.equal(fixtureRequests.has('/staff-api/catalogue/price-preview'),false);
-    await click('Preview AED price','.catalogue-product-card');
-    await visible('3.17 GBP');
-    assert.equal(await run("document.querySelectorAll('dialog input').length"),0);
-    assert.ok(await run("document.querySelector('dialog').textContent.includes('Platform feeAED 2.00CommissionAED 0.50')"));
-    await click('Close','dialog');
-    await until(()=>run("document.querySelector('dialog')===null"),'Price preview did not close');
     await until(()=>run("document.querySelector('.catalogue-brand-logo--airtel-bd img')?.naturalWidth===1152"),'Brand artwork did not load');
     await until(()=>run("document.querySelector('.catalogue-flag--gt img')?.naturalWidth===1536"),'High-resolution flag artwork was not loaded');
     assert.deepEqual(await run(`(()=>{const flag=document.querySelector('.catalogue-flag--gt');

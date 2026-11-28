@@ -1,0 +1,15 @@
+{
+  "version": null,
+  "effectiveFrom": null,
+  "selection": {
+    "objective": null,
+    "timing": null
+  },
+  "refresh": {
+    "mode": null,
+    "dailyAt": null,
+    "timeZone": null,
+    "intervalMinutes": null,
+    "providerEventTypes": []
+  }
+}

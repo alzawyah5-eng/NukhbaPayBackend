@@ -33,7 +33,18 @@ export async function rehearseLocalCatalogueSchema(client) {
     NOT has_column_privilege('nukhbapay_catalogue_reader','nukhabapay.price_submission_evidence','canonical_payload','SELECT') AS evidence_private,
     NOT has_table_privilege('nukhbapay_catalogue_runtime','nukhabapay.price_workflow_versions','INSERT') AS mutation_closed,
     NOT has_table_privilege('nukhbapay_catalogue_runtime','nukhabapay.catalogue_refresh_jobs','INSERT') AS refresh_closed,
-    NOT has_table_privilege('nukhbapay_catalogue_runtime','nukhabapay.publication_delivery_state','UPDATE') AS delivery_closed`);
+    NOT has_table_privilege('nukhbapay_catalogue_runtime','nukhabapay.publication_delivery_state','UPDATE') AS delivery_closed,
+    (SELECT relrowsecurity AND relforcerowsecurity FROM pg_class
+      WHERE oid='nukhabapay.price_commercial_draft_evidence'::regclass) AS commercial_rls_forced,
+    NOT has_table_privilege('nukhbapay_catalogue_reader','nukhabapay.price_commercial_draft_evidence','SELECT') AS commercial_reader_closed,
+    NOT has_table_privilege('nukhbapay_catalogue_runtime','nukhabapay.price_commercial_draft_evidence',
+      'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER') AS commercial_runtime_closed,
+    NOT has_table_privilege('nukhbapay_catalogue_runtime','nukhabapay.catalogue_pricing_proposals','INSERT,UPDATE') AS pricing_policy_closed,
+    NOT has_table_privilege('nukhbapay_catalogue_reader','nukhabapay.catalogue_pricing_decisions','SELECT') AS pricing_decisions_private,
+    has_table_privilege('nukhbapay_catalogue_reader','nukhabapay.staff_discovery_mapping_status','SELECT')
+      AND NOT has_column_privilege('nukhbapay_catalogue_reader','nukhabapay.product_mappings','provider_sku','SELECT')
+      AND NOT has_column_privilege('nukhbapay_catalogue_reader','nukhabapay.product_mappings','mapping_version','SELECT')
+      AND NOT has_column_privilege('nukhbapay_catalogue_reader','nukhabapay.product_mappings','provenance','SELECT') AS discovery_mapping_status_only`);
   assert.ok(Object.values(grants).every(value => value === true));
 
   for (const id of [tenant, otherTenant]) {
@@ -44,20 +55,32 @@ export async function rehearseLocalCatalogueSchema(client) {
   await client.query(`INSERT INTO nukhabapay.products(id,canonical_product_key,brand,redemption_country,currency,
     face_value_minor,fulfillment_method,terms_version) VALUES($1,$2,'Qualification','AE','AED',100,'DIGITAL_PIN','test')`, [product, product]);
   await client.query(`INSERT INTO nukhabapay.provider_accounts(id,tenant_id,provider_code,external_account_key,status)
-    VALUES($1,$2,'LOCAL_QUALIFICATION',$3,'ACTIVE')`, [account, tenant, account]);
+    VALUES($1,$2,'FINXPLOR',$3,'ACTIVE')`, [account, tenant, account]);
   const scan = randomUUID(), discovery = randomUUID();
   await client.query(`INSERT INTO nukhabapay.catalogue_discoveries(id,tenant_id,provider_account_id,source_id,source_digest,
-    product_name,brand,source_country,currency,category,delivery,denominations,min_amount,max_amount)
-    VALUES($1,$2,$3,'qualification','${'a'.repeat(64)}','Qualification','Qualification','BGD','BDT','Mobile recharge','email','["100"]','100','100')`,
+    product_name,brand,source_country,currency,category,delivery,denominations,min_amount,max_amount,source_country_label,source_category_label)
+    VALUES($1,$2,$3,'qualification','${'a'.repeat(64)}','Qualification','Qualification','ARE','AED','Gift Card','email','["1.00"]','1.00','1.00','ARE','Gift Card')`,
   [discovery, tenant, account]);
-  await client.query(`INSERT INTO nukhabapay.catalogue_discovery_scans(id,tenant_id,provider_account_id)
-    VALUES($1,$2,$3)`, [scan, tenant, account]);
+  const scanDigest = createHash('sha256').update('ARE_GIFT_CARD\nqualification:' + 'a'.repeat(64)).digest('hex');
+  await client.query(`INSERT INTO nukhabapay.catalogue_discovery_scans
+    (id,tenant_id,provider_account_id,coverage_scope,page_count,product_count,source_observed_at,scan_digest)
+    VALUES($1,$2,$3,'ARE_GIFT_CARD',2,1,$4,$5)`, [scan, tenant, account, stamp, scanDigest]);
+  await expectDenied('23514', () => client.query('SET CONSTRAINTS nukhabapay.local_discovery_coverage_at_commit IMMEDIATE'));
   const includeDiscovery = id => client.query(`INSERT INTO nukhabapay.catalogue_discovery_scan_items
     (tenant_id,provider_account_id,scan_id,discovery_id) VALUES($1,$2,$3,$4)`, [tenant, account, scan, id]);
   await expectDenied('23503', () => includeDiscovery(randomUUID()));
   await includeDiscovery(discovery);
+  await client.query('SET CONSTRAINTS nukhabapay.local_discovery_coverage_at_commit IMMEDIATE');
+  assert.equal((await client.query('SELECT 1 FROM nukhabapay.current_catalogue_discoveries WHERE id=$1 AND coverage_scope=$2',
+    [discovery, 'ARE_GIFT_CARD'])).rowCount, 1);
+  await client.query(`INSERT INTO nukhabapay.catalogue_discovery_confirmations(tenant_id,provider_account_id,scan_id,run_id,observed_at)
+    VALUES($1,$2,$3,$4,$5)`,[tenant,account,scan,randomUUID(),stamp]);
+  await expectDenied('42501', () => client.query('DELETE FROM nukhabapay.catalogue_discovery_confirmations'));
+  assert.equal((await client.query('SELECT 1 FROM nukhabapay.observed_catalogue_discoveries WHERE id=$1 AND last_verified_at>=observed_at',
+    [discovery])).rowCount, 1);
   await scope(otherTenant);
   assert.equal((await client.query('SELECT 1 FROM nukhabapay.catalogue_discovery_scan_items WHERE scan_id=$1', [scan])).rowCount, 0);
+  assert.equal((await client.query('SELECT 1 FROM nukhabapay.current_catalogue_discoveries WHERE id=$1', [discovery])).rowCount, 0);
   await scope(tenant);
   await client.query(`INSERT INTO nukhabapay.provider_snapshots(id,tenant_id,provider_account_id,snapshot_key,source_version,
     observed_at,status,row_count,completed_at) VALUES($1,$2,$3,'qualification','v1',$4,'COMPLETE',0,$5)`, [snapshot, tenant, account, started, stamp]);
@@ -72,9 +95,55 @@ export async function rehearseLocalCatalogueSchema(client) {
     [candidate, tenant, product, snapshot, account, started, stamp]);
   await client.query(`INSERT INTO nukhabapay.catalogue_publication_requests(operation_id,tenant_id,product_id,idempotency_key,candidate_id,
     candidate_digest,outcome) VALUES($1,$2,$3,$4,$5,$5,'DRAFT_CREATED')`, [draftOperation, tenant, product, randomUUID(), candidate]);
+
+  const commercialPayload = JSON.stringify(['AED_COMMERCIAL_PRICE_OBSERVATION_V1', tenant, account,
+    'qualification', discovery, 'AE', '1.00', 'AED', '0.85', '0.05', true,
+    'local-qualification', stamp.getTime(), expiry.getTime()]);
+  const commercialDigest = createHash('sha256').update(commercialPayload).digest('hex');
+  const reviewDigest = (deadline, op = draftOperation) => createHash('sha256')
+    .update(JSON.stringify(['AED_COMMERCIAL_PRICE_DRAFT_REVIEW_V2', commercialDigest, op, candidate, deadline.toISOString()]))
+    .digest('hex');
+  const saveCommercialEvidence = ({ deadline = expiry, op = draftOperation,
+    evidence = commercialPayload, review = reviewDigest(deadline, op) } = {}) => client.query(`
+    INSERT INTO nukhabapay.price_commercial_draft_evidence
+      (candidate_id,tenant_id,product_id,operation_id,commercial_digest,commercial_payload,review_digest,validity_deadline)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, [candidate, tenant, product, op, commercialDigest, evidence, review, deadline]);
+  const checkCommercialEvidence = () => client.query('SET CONSTRAINTS nukhabapay.local_commercial_draft_fresh_at_commit IMMEDIATE');
+  await expectDenied('23503', () => saveCommercialEvidence());
   await client.query(`INSERT INTO nukhabapay.catalogue_publication_events(event_id,operation_id,candidate_id,tenant_id,product_id,
     price_version,candidate_digest,event_name,occurred_at) VALUES($1,$2,$3,$4,$5,1,$3,'CATALOGUE_PUBLICATION_CANDIDATE_CREATED',$6)`,
     [randomUUID(), draftOperation, candidate, tenant, product, stamp]);
+  await expectDenied('23514', () => saveCommercialEvidence({ evidence: commercialPayload + ' ' }));
+  await expectDenied('23514', () => saveCommercialEvidence({ review: '0'.repeat(64) }));
+  for (const deadline of [started, new Date(expiry.getTime() + 1)]) {
+    await expectDenied('23514', async () => {
+      await saveCommercialEvidence({ deadline });
+      await checkCommercialEvidence();
+    });
+  }
+  await expectDenied('23514', async () => {
+    const op = createHash('sha256').update(randomUUID()).digest('hex');
+    await client.query(`INSERT INTO nukhabapay.catalogue_publication_requests(operation_id,tenant_id,product_id,idempotency_key,
+      candidate_id,candidate_digest,outcome) VALUES($1,$2,$3,$4,$5,$5,'DRAFT_REPLAYED')`, [op, tenant, product, randomUUID(), candidate]);
+    await saveCommercialEvidence({ op });
+    await checkCommercialEvidence();
+  });
+  await saveCommercialEvidence();
+  await checkCommercialEvidence();
+  const loadCommercialEvidence = () => client.query(`SELECT commercial_payload,review_digest
+    FROM nukhabapay.price_commercial_draft_evidence WHERE candidate_id=$1`, [candidate]);
+  assert.deepEqual((await loadCommercialEvidence()).rows, [{ commercial_payload: commercialPayload, review_digest: reviewDigest(expiry) }]);
+  await expectDenied('23505', () => saveCommercialEvidence());
+  await expectDenied('42501', () => client.query('UPDATE nukhabapay.price_commercial_draft_evidence SET validity_deadline=clock_timestamp()'));
+  await expectDenied('42501', () => client.query('DELETE FROM nukhabapay.price_commercial_draft_evidence'));
+  await expectDenied('42501', () => client.query('TRUNCATE nukhabapay.price_commercial_draft_evidence'));
+  await client.query("SELECT set_config('nukhabapay.publication_tenant_id',$1,true)", [otherTenant]);
+  assert.equal((await loadCommercialEvidence()).rowCount, 0);
+  await scope(otherTenant);
+  assert.equal((await loadCommercialEvidence()).rowCount, 0);
+  await expectDenied('42501', () => saveCommercialEvidence());
+  await scope(tenant);
+
   await client.query(`INSERT INTO nukhabapay.price_submission_evidence(candidate_id,tenant_id,product_id,canonical_payload,creator_staff_id,
     authority_receipt_digest,submitted_at) VALUES($1,$2,$3,$4,$5,$6,$7)`, [candidate, tenant, product, payload, actor, '1'.repeat(64), stamp]);
   await expectDenied('23514', () => client.query('SET CONSTRAINTS nukhabapay.local_submission_evidence IMMEDIATE'));

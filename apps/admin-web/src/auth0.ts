@@ -1,7 +1,8 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { isIP } from "node:net";
+import { setTimeout as wait } from "node:timers/promises";
 import { inspect } from "node:util";
-import { createRemoteJWKSet, customFetch, decodeProtectedHeader, jwtVerify } from "jose";
+import { createRemoteJWKSet, customFetch, decodeProtectedHeader, errors, jwtVerify, type JWTPayload } from "jose";
 import { attestVerifiedStaffIdentity } from "@nukhbapay/application/verified-identity";
 import { normalizePublicationCommand, type PublicationCommand, type StaffSessionLifecycle, type TrustedStaffActorBoundary } from "@nukhbapay/application";
 
@@ -14,10 +15,13 @@ const text = (v: unknown, max = 512): v is string => typeof v === "string" && v.
 const date = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) >= 0;
 const AUTH0_DEPENDENCY_TIMEOUT_MS = 3000;
 const DEFAULT_ACCESS_TOKEN_LIFETIME_SECONDS = 300;
+const LOCAL_TOKEN_CLOCK_WAIT_MS = 2000;
 
 export type StaffCallbackFailureStage =
   | "callback-state" | "authorization-response" | "token-exchange" | "token-response"
   | "id-token-format" | "id-token-verification" | "id-token-lifetime" | "id-token-mfa"
+  | "id-token-signing-key" | "id-token-signature" | "id-token-issuer" | "id-token-audience"
+  | "id-token-time" | "id-token-future" | "id-token-expired" | "id-token-stale" | "id-token-claims"
   | "access-token-profile" | "access-token-verification" | "access-token-lifetime" | "access-token-audience"
   | "access-token-claims" | "staff-principal-claim" | "signed-token-binding"
   | "privileged-assurance" | "staff-authorization" | "session-persistence";
@@ -339,30 +343,67 @@ export class Auth0Login {
     return { location: location.href, cookie: transactionCookie(id) };
   }
   async #verify(token: unknown, kind: "id" | "access", now: Date, mark: (stage: StaffCallbackFailureStage) => void,
-    accessTokenLifetimeSeconds: number) {
+    accessTokenLifetimeSeconds: number, localLogin?: Transaction): Promise<JWTPayload> {
     mark(kind === "id" ? "id-token-format" : "access-token-profile");
     if (!text(token, 8192) || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token)) throw fail();
     const h = decodeProtectedHeader(token);
     if (h.alg !== "RS256" || !text(h.kid, 128) || h.typ !== (kind === "id" ? "JWT" : "at+jwt") ||
         Object.keys(h).some(n => !["alg", "kid", "typ"].includes(n))) throw fail();
     mark(kind === "id" ? "id-token-verification" : "access-token-verification");
-    const { payload: p } = await jwtVerify(token, async (header, jwt) => {
+    const verified = jwtVerify(token, async (header, jwt) => {
+      if (kind === "id") mark("id-token-signing-key");
       const key = await this.#keys(header, jwt);
       if (!(key instanceof CryptoKey) || key.type !== "public" || key.algorithm.name !== "RSASSA-PKCS1-v1_5" ||
           !("modulusLength" in key.algorithm) || typeof key.algorithm.modulusLength !== "number" ||
           key.algorithm.modulusLength < 2048 || key.algorithm.modulusLength > 4096) throw fail();
+      if (kind === "id") mark("id-token-signature");
       return key;
     }, { algorithms: ["RS256"], issuer: this.#config.issuer,
       audience: kind === "id" ? this.#config.clientId : this.#config.audience,
       requiredClaims: ["iss", "sub", "aud", "iat", "exp"], currentDate: now, clockTolerance: 0,
       maxTokenAge: 300 });
+    let p: JWTPayload;
+    try {
+      ({ payload: p } = await verified);
+    } catch (error) {
+      const futureClaim = error instanceof errors.JWTClaimValidationFailed && error.reason === "check_failed" &&
+        (error.claim === "iat" || error.claim === "nbf") ? error.payload[error.claim] : undefined;
+      if (kind === "id") {
+        if (error instanceof errors.JWTExpired) mark(error.claim === "exp" ? "id-token-expired" : "id-token-stale");
+        else if (error instanceof errors.JWTClaimValidationFailed) {
+          switch (error.claim) {
+            case "iss": mark("id-token-issuer"); break;
+            case "aud": mark("id-token-audience"); break;
+            case "iat": case "nbf": case "exp": mark(date(futureClaim) ? "id-token-future" : "id-token-time"); break;
+            default: mark("id-token-claims");
+          }
+        } else if (error instanceof errors.JWTInvalid) mark("id-token-claims");
+      }
+      if (localLogin && date(futureClaim)) {
+        // JOSE checks the signature before comparing dates. Wait for a nearby
+        // boundary, then verify again with zero tolerance and the actual clock.
+        const validFrom = futureClaim * 1000;
+        const ahead = validFrom - now.getTime();
+        const checkedAt = this.#time();
+        if (ahead > 0 && ahead <= LOCAL_TOKEN_CLOCK_WAIT_MS && Math.max(validFrom, checkedAt) < localLogin.expires &&
+            !localLogin.cancellation.signal.aborted && !this.#closed) {
+          if (validFrom > checkedAt) await wait(validFrom - checkedAt, undefined, { signal:localLogin.cancellation.signal });
+          const retryAt = this.#time();
+          if (retryAt >= validFrom && retryAt < localLogin.expires && !localLogin.cancellation.signal.aborted && !this.#closed) {
+            return this.#verify(token, kind, new Date(retryAt), mark, accessTokenLifetimeSeconds);
+          }
+        }
+      }
+      throw fail();
+    }
     const seconds = now.getTime() / 1000;
+    if (kind === "id") mark("id-token-claims");
     if (!text(p.sub) || !date(p.iat) || !date(p.exp) || p.iat > seconds || p.exp <= p.iat ||
         p.nbf !== undefined && (!date(p.nbf) || p.nbf >= p.exp) ||
         ["act", "may_act", "gty", "sub_profile", "client_profile"].some(n => n in p)) throw fail();
     mark(kind === "id" ? "id-token-lifetime" : "access-token-lifetime");
     if (p.exp - p.iat > (kind === "id" ? 3600 : accessTokenLifetimeSeconds)) throw fail();
-    mark(kind === "id" ? "id-token-verification" : "access-token-audience");
+    mark(kind === "id" ? "id-token-audience" : "access-token-audience");
     if (!(kind === "id" ? p.aud === this.#config.clientId : this.#accessAudience(p.aud))) throw fail();
     mark(kind === "id" ? "id-token-mfa" : "access-token-claims");
     if (kind === "access" && (!text(p.jti, 256) || p['client_id'] !== this.#config.clientId ||
@@ -546,9 +587,9 @@ export class Auth0Login {
       const lifetime = transaction.stepUp ? DEFAULT_ACCESS_TOKEN_LIFETIME_SECONDS :
         this.#config.localSessionLifetimeSeconds ?? DEFAULT_ACCESS_TOKEN_LIFETIME_SECONDS;
       if (tokens['expires_in'] > lifetime) throw fail();
-      const now = new Date(this.#time());
-      const id = await this.#verify(tokens['id_token'], "id", now, mark, lifetime);
-      const access = await this.#verify(tokens['access_token'], "access", now, mark, lifetime);
+      const localLogin = !transaction.stepUp && this.#config.localSessionLifetimeSeconds === 600 ? transaction : undefined;
+      const id = await this.#verify(tokens['id_token'], "id", new Date(this.#time()), mark, lifetime, localLogin);
+      const access = await this.#verify(tokens['access_token'], "access", new Date(this.#time()), mark, lifetime, localLogin);
       mark("signed-token-binding");
       const expiry = Math.min(access.exp!, id.exp!, (id['auth_time'] as number) + lifetime);
       const current = () => !transaction.cancellation.signal.aborted && !this.#closed &&

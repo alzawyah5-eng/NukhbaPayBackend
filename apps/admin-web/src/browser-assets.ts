@@ -51,6 +51,11 @@ export function loadBrowserAssets(directory: string): BrowserAssets {
   if (existsSync(join(directory, 'catalogue-brand-logos.png'))) {
     add('/catalogue-brand-logos.png', 'catalogue-brand-logos.png', 'image/png');
   }
+  for(const file of readdirSync(directory)) {
+    if(/^catalogue-logo-[a-z_]+\.(png|jpg)$/.test(file)) {
+      add('/'+file,file,file.endsWith('.jpg')?'image/jpeg':'image/png');
+    }
+  }
   if (!lstatSync(join(directory, 'assets')).isDirectory() || lstatSync(join(directory, 'assets')).isSymbolicLink()) throw new Error('Invalid staff UI build');
   for (const file of readdirSync(join(directory, 'assets'))) {
     if (!/^[A-Za-z0-9_-]+\.(?:js|css)$/.test(file)) throw new Error('Unexpected staff UI asset');

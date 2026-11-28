@@ -9,7 +9,7 @@ import { createPlatformStaffCommandAdmission, type PlatformStaffPilotPort } from
 import { browserAsset, developmentPreviewEnabled, type BrowserAssets } from './browser-assets.js';
 import { validateDevelopmentCertificate, probeDevelopmentHttps } from './development-tls.js';
 import { departmentCookie, positionAllows, positionAllowsCatalogue, positionProof, workspaceViewPage } from './department-access.js';
-import { calculateAedPricePreview, parseStaffWorkspaceCommand, type LocalPricePreviewBasis } from '@nukhbapay/application';
+import { AedNormalizationUnavailableError, AED_NORMALIZATION_UNAVAILABLE, parseStaffWorkspaceCommand, type FinxplorAcquisitionSummary, type FinxplorLayer1Price, type VerifiedStaffIdentity } from '@nukhbapay/application';
 
 export const PORTAL_COOKIE_NAME="__Host-nukhbapay_staff";
 export interface InternalSessionPort {
@@ -50,6 +50,9 @@ function htmlLogoutPolicy(body:Buffer,destination:string):Buffer {
   return Buffer.from(html.replace(/<head(?:\s[^>]*)?>/i,head=>`${head}<meta name="nukhbapay-provider-logout" content="${safe}">`));
 }
 
+type FxRefreshResult = {status:'not-configured'|'already-running'} |
+  {status:'completed';ratesFetched:number;converted:number;pending:number;failedCurrencies:number};
+
 /** Trusted server DI only. CLI supplies neither sessions nor login. */
 export async function createStaffPortal(options:{
   readonly pfx:Buffer;readonly certificate:Buffer;readonly passphrase:string;readonly port?:number;readonly sessions?:InternalSessionPort;
@@ -60,7 +63,13 @@ export async function createStaffPortal(options:{
   readonly departmentAccess?: Pick<StaffWorkspaceService,'positions'>;
   readonly windowsStaffStorageReady?: () => Promise<boolean>;
   readonly localCataloguePreview?: boolean;
-  readonly localPricePreview?: LocalPricePreviewBasis & {readonly tenantId:string;readonly discoveryId:string};
+  readonly finxplorLayer1Prices?: (tenantId: string, discoveryIds: readonly string[]) =>
+    Promise<ReadonlyMap<string, readonly FinxplorLayer1Price[]>>;
+  readonly finxplorAcquisitions?: (identity: VerifiedStaffIdentity, tenantId: string,
+    discoveryIds: readonly string[], includeAmounts: boolean) =>
+    Promise<ReadonlyMap<string, FinxplorAcquisitionSummary>>;
+  readonly refreshFxRates?: (tenantId:string)=>Promise<FxRefreshResult>;
+  readonly syncCatalogue?: (tenantId:string)=>Promise<{products:number;inserted:number;unchanged:number;nextPage?:number;verificationPending?:boolean;verificationMismatch?:boolean;layer1?:{amounts:number;pendingFx:number}|null}>;
   readonly staffSuspension?: StaffSuspensionPort;
   readonly staffPublication?: StaffPublicationPort;
   readonly platformStaffPilot?: PlatformStaffPilotPort;
@@ -75,7 +84,6 @@ export async function createStaffPortal(options:{
   if(options.windowsStaffStorageReady && (!departmentAccess || !options.login || !options.sessions || previewEnabled))throw unavailable();
   if(options.localCataloguePreview && (!options.windowsStaffStorageReady || !options.staffCatalogue?.available ||
       !departmentAccess || environment['NODE_ENV']!=='development' || previewEnabled))throw unavailable();
-  if(options.localPricePreview && !options.localCataloguePreview)throw unavailable();
   if(departmentAccess && (!workspaceService || !options.login || options.staffPublication ||
     options.staffSuspension || options.platformStaffPilot))throw unavailable();
   if(workspaceService && (!options.login || options.login.platformScope || !options.sessions ||
@@ -111,7 +119,10 @@ export async function createStaffPortal(options:{
       res.setHeader("Cache-Control","no-store");res.setHeader("X-Content-Type-Options","nosniff");
       res.setHeader("Referrer-Policy","no-referrer");
       res.setHeader("Content-Security-Policy","default-src 'none'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
-      if(options.browserAssets)res.setHeader('Content-Security-Policy',"default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
+      if(options.browserAssets) {
+        const media = options.finxplorLayer1Prices ? ' https://finxplorconnect.com/api/v1/media/' : '';
+        res.setHeader('Content-Security-Policy',`default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'${media}; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`);
+      }
       void (async()=>{
         if(req.headers.host!==new URL(origin).host || req.rawHeaders.length>128 || req.headersDistinct['host']?.length!==1){send(res,400,'{"error":"Invalid request"}');return;}
         // Browsers can carry the provider's cross-site marker through the callback's redirect to the public shell.
@@ -225,7 +236,45 @@ export async function createStaffPortal(options:{
               ? positionAllowsCatalogue(selected,'discoveries',options.localCataloguePreview) : positionAllows(selected,path))):navigation,
             ...(workspace && positions && {departmentAccess:{positions:positions.map(({department,role})=>({department,role})),
               selected:selected?{department:selected.department,role:selected.role}:null}}),
-            ...(workspace && {csrfToken:csrf(token)})}));return;
+            ...(workspace && {csrfToken:csrf(token)}),
+            ...(workspace && options.refreshFxRates && navigation.includes('/catalogue') &&
+              selected?.role==='TENANT_STAFF_MANAGER' && {canRefreshFxRates:true})}));return;
+        }
+        if(req.method==='POST' && (req.url==='/staff-api/catalogue/sync' || req.url==='/staff-api/catalogue/refresh-rates')) {
+          const refreshFx = req.url==='/staff-api/catalogue/refresh-rates';
+          const token=sessionCookie(req), proof=req.headersDistinct['x-csrf-token'];
+          if(!token){send(res,401,'{"error":"Authentication required"}');return;}
+          if(!(refreshFx ? options.refreshFxRates : options.syncCatalogue) || !options.login || !options.staffCatalogue ||
+             req.headersDistinct['origin']?.length!==1 || req.headers.origin!==origin ||
+             proof?.length!==1 || !tokenPattern.test(proof[0]!) ||
+             !timingSafeEqual(Buffer.from(proof[0]!),Buffer.from(csrf(token))) ||
+             req.headersDistinct['authorization']) {
+            send(res,403,'{"error":"Request denied"}');return;
+          }
+          try {
+            if((await selectedPosition(token))?.role!=='TENANT_STAFF_MANAGER') {
+              send(res,403,'{"error":"Request denied"}');return;
+            }
+            req.socket.setTimeout(refreshFx ? 425_000 : 785_000);
+            const result=await options.login.readForSession(token,async(identity,tenantId,_staffId,revalidate)=>{
+              await options.staffCatalogue!.read(identity,tenantId,'discovery-providers',{limit:'1'});
+              if (refreshFx) {
+                if (!await revalidate() || (await selectedPosition(token))?.role!=='TENANT_STAFF_MANAGER') {
+                  throw new AdministrationError(403);
+                }
+                return options.refreshFxRates!(tenantId);
+              }
+              return {...await options.syncCatalogue!(tenantId),persisted:true};
+            });
+            send(res,200,JSON.stringify(result));
+          } catch (error) {
+            if (refreshFx && error instanceof AdministrationError && error.status===403) {
+              send(res,403,'{"error":"Request denied"}');
+            } else send(res,503,JSON.stringify({error:refreshFx ? 'Exchange-rate refresh could not be confirmed.' :
+              'Sync could not be completed. Existing saved products are retained.'}));
+          }
+          finally {req.socket.setTimeout(15_000);}
+          return;
         }
         if(req.method==='POST' && options.localCataloguePreview && req.url==='/staff-api/catalogue/price-preview') {
           const token=sessionCookie(req), proof=req.headersDistinct['x-csrf-token'];
@@ -255,17 +304,11 @@ export async function createStaffPortal(options:{
                typeof input.discoveryId!=='string' || !administrationUuid.test(input.discoveryId)) {
               send(res,400,'{"error":"Invalid preview request"}');return;
             }
-            const cost=options.localPricePreview;
-            const available=await options.login!.readForSession(token,async (identity,tenantId)=>{
-              if(!cost || cost.tenantId!==tenantId || cost.discoveryId!==input.discoveryId)return false;
-              const page=await options.staffCatalogue!.read(identity,tenantId,'discoveries',{discoveryId:input.discoveryId,limit:'1'});
-              return page.count===1&&page.items.length===1&&page.items[0]?.id===cost.discoveryId;
-            });
             if((await selectedPosition(token))?.role!=='TENANT_STAFF_MANAGER') {
               send(res,403,'{"error":"Request denied"}');return;
             }
-            if(!available || !cost){send(res,409,'{"error":"Provider cost is unavailable for this product"}');return;}
-            send(res,200,JSON.stringify(calculateAedPricePreview(cost)));
+            const unavailable = new AedNormalizationUnavailableError();
+            send(res,503,JSON.stringify({code:unavailable.code,error:unavailable.message}));
           } catch {
             send(res,403,'{"error":"Price preview unavailable"}');
           }
@@ -292,24 +335,52 @@ export async function createStaffPortal(options:{
             if (departmentAccess && !positionAllowsCatalogue(await selectedPosition(token), view, options.localCataloguePreview)) {
               send(res,403,'{"error":"Catalogue unavailable"}');return;
             }
-            const cost=options.localPricePreview;
-            const {data,price}=await options.login.readForSession(token,async (identity,tenantId)=>{
-              const data=await options.staffCatalogue!.read(identity,tenantId,view,query);
-              const price=view==='discoveries' && cost?.tenantId===tenantId &&
-                data.items.some(item=>item.id===cost.discoveryId) ? calculateAedPricePreview(cost) : undefined;
-              return {data,price};
+            const mayReadAcquisition = (position: Awaited<ReturnType<typeof selectedPosition>>) =>
+              positionAllowsCatalogue(position, 'economics') ||
+              (options.localCataloguePreview && position?.role === 'TENANT_STAFF_MANAGER');
+            const acquisitionPosition = view === 'discoveries' && options.finxplorAcquisitions && departmentAccess
+              ? await selectedPosition(token) : undefined;
+            const includeAcquisitions = mayReadAcquisition(acquisitionPosition);
+            const { data, acquisitions, prices } = await options.login.readForSession(token, async (identity,tenantId) => {
+              const data = await options.staffCatalogue!.read(identity,tenantId,view,query);
+              if (view !== 'discoveries' || (!includeAcquisitions && !options.finxplorLayer1Prices))
+                return { data, acquisitions: undefined, prices: undefined };
+              const ids = data.items.flatMap(item =>
+                item.providerId === 'FINXPLOR' && typeof item.id === 'string' ? [item.id] : []);
+              if (!ids.length) return { data, acquisitions: undefined, prices: undefined };
+              const prices = await options.finxplorLayer1Prices?.(tenantId,ids).catch(() => null);
+              if (!includeAcquisitions || options.finxplorLayer1Prices) return { data, acquisitions: undefined, prices };
+              const summaries = await options.finxplorAcquisitions!(identity, tenantId, ids,
+                positionAllowsCatalogue(acquisitionPosition, 'economics')).catch(() =>
+                new Map<string, FinxplorAcquisitionSummary>());
+              return { data, acquisitions: summaries, prices };
             });
             const positionAfterRead=departmentAccess ? await selectedPosition(token) : undefined;
             if (departmentAccess && !positionAllowsCatalogue(positionAfterRead, view, options.localCataloguePreview)) {
               send(res,403,'{"error":"Catalogue unavailable"}');return;
             }
-            const previewCapability=view==='discovery-providers' && options.localCataloguePreview && positionAfterRead?.role==='TENANT_STAFF_MANAGER';
-            if(price && cost && positionAfterRead?.role==='TENANT_STAFF_MANAGER') {
-              const items=data.items.map(item=>item.id===cost.discoveryId?{...item,sellingPricePreview:price.indicativePrice}:item);
+            if (prices !== undefined) {
+              const items=data.items.map(item => item.providerId==='FINXPLOR' && typeof item.id==='string'
+                ? {...item,layer1Prices:prices ? prices.get(item.id) ?? [] : null} : item);
               send(res,200,JSON.stringify({...data,items}));
-            } else {
-              send(res,200,JSON.stringify(previewCapability?{...data,pricingPreviewAvailable:true}:data));
+              return;
             }
+            if (acquisitions && mayReadAcquisition(positionAfterRead)) {
+              const showAmounts = positionAllowsCatalogue(positionAfterRead, 'economics');
+              const items = data.items.map(item => {
+                if (item.providerId !== 'FINXPLOR' || typeof item.id !== 'string') return item;
+                const summary = acquisitions.get(item.id);
+                const acquisitionCost = summary?.status === 'NORMALIZED' && !showAmounts
+                  ? { status: 'VERIFIED' } : summary ?? { status: 'UNAVAILABLE' };
+                return { ...item, acquisitionCost };
+              });
+              send(res,200,JSON.stringify({ ...data, items }));
+              return;
+            }
+            const pricePreviewUnavailable=view==='discovery-providers' && !options.finxplorLayer1Prices && options.localCataloguePreview &&
+              positionAfterRead?.role==='TENANT_STAFF_MANAGER';
+            send(res,200,JSON.stringify(pricePreviewUnavailable
+              ? {...data,pricingPreviewAvailable:false,normalizationStatus:AED_NORMALIZATION_UNAVAILABLE} : data));
           } catch (error) {
             send(res,error instanceof AdministrationError ? error.status : 403,'{"error":"Catalogue unavailable"}');
           }

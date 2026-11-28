@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { prepareSyntheticPublicationCommand, independentlyVerifyPublicationPayload, type PublicationCommand, type SyntheticPublicationPermission, prepareSyntheticPriceSubmission, submissionDigest, generateDraftPublicationCandidate, type DraftPublicationRequest } from "@nukhbapay/application";
+import { prepareSyntheticPublicationCommand, independentlyVerifyPublicationPayload, type PublicationCommand, type SyntheticPublicationPermission, prepareSyntheticPriceSubmission, submissionDigest, generateDraftPublicationCandidate, prepareAedCommercialPriceDraft, type DraftPublicationRequest } from "@nukhbapay/application";
 import { createPublishedCatalogueReader, createCatalogueReadAuditWriter, createCataloguePublicationDraftStore, PublicationDraftConflictError, PublicationDraftStaleError } from "@nukhbapay/database";
 import { Client } from "pg";
 import { attestVerifiedStaffIdentity } from "@nukhbapay/application/verified-identity";
@@ -336,6 +336,93 @@ test("proposed 007 provides atomic, immutable, tenant-scoped draft publication e
         await writer!.query("BEGIN");try{await writer!.query("SELECT set_config('nukhabapay.publication_tenant_id',$1,true)",[otherTenantId]);
           assert.equal((await writer!.query("SELECT count(*)::int AS n FROM nukhabapay.price_submission_evidence")).rows[0].n,0);
         }finally{await writer!.query("ROLLBACK");}
+      });
+      await t.test('USD commercial evidence, draft and audit commit atomically under tenant scope',
+        { skip: 'Previous Layer 1 implementation disabled' }, async () => {
+        const commercialSql = readFileSync(path.join(databaseRoot, 'pending-migrations/014_commercial_draft_evidence.sql'), 'utf8');
+        await owner.query('BEGIN');
+        try {
+          await assert.rejects(() => owner.query(commercialSql), { code: '42501' });
+        } finally { await owner.query('ROLLBACK'); }
+        await owner.query('BEGIN');
+        try {
+          await owner.query("SELECT set_config('nukhbapay.commercial_draft_migration','DISPOSABLE_COMMERCIAL_DRAFT_V1',true), set_config('nukhabapay.publication_writer_role',$1,true)", [writerRole]);
+          await owner.query(commercialSql);
+          await owner.query('COMMIT');
+        } catch (error) { await owner.query('ROLLBACK'); throw error; }
+
+        const commercialAccount = randomUUID(), commercialSnapshot = randomUUID(), commercialMapping = randomUUID();
+        const discoveryId = randomUUID(), now = new Date();
+        const observedAt = new Date(now.getTime() - 120_000).toISOString();
+        const completedAt = new Date(now.getTime() - 60_000).toISOString();
+        const validUntil = new Date(now.getTime() + 300_000).toISOString();
+        const scope = { tenantId: otherTenantId, providerAccountId: commercialAccount };
+        const sourceProductId = 'FIXTURE-100';
+        await owner.query("INSERT INTO nukhabapay.provider_accounts(id,tenant_id,provider_code,external_account_key,status) VALUES($1,$2,'SYNTH_PROVIDER_A','commercial-fixture','ACTIVE')", [commercialAccount, otherTenantId]);
+        await owner.query(`INSERT INTO nukhabapay.provider_snapshots(id,tenant_id,provider_account_id,snapshot_key,source_version,
+          observed_at,status,row_count,completed_at) VALUES($1,$2,$3,'commercial-snapshot','synthetic-v1',$4,'COMPLETE',1,$5)`,
+          [commercialSnapshot, otherTenantId, commercialAccount, observedAt, completedAt]);
+        await owner.query(`INSERT INTO nukhabapay.product_mappings(id,tenant_id,provider_account_id,provider_sku,product_id,
+          mapping_version,status,provenance_kind,provenance,source_snapshot_id)
+          VALUES($1,$2,$3,$4,$5,1,'APPROVED','IMPORT','{"source":"synthetic"}'::jsonb,$6)`,
+          [commercialMapping, otherTenantId, commercialAccount, sourceProductId, productId, commercialSnapshot]);
+        await owner.query(`INSERT INTO nukhabapay.provider_offers(id,tenant_id,provider_account_id,provider_snapshot_id,
+          product_mapping_id,product_mapping_version,product_id,face_value_minor,provider_offer_key,provider_debit_minor,
+          additional_provider_fee_minor,upfront_discount_minor,available,observed_at,valid_until)
+          VALUES($1,$2,$3,$4,$5,1,$6,10000,'fixture-usd-offer',9600,50,400,true,$7,$8)`,
+          [randomUUID(), otherTenantId, commercialAccount, commercialSnapshot, commercialMapping, productId, observedAt, validUntil]);
+        const binding = { ...scope, sourceProductId, discoveryId, country: 'ARE', currency: 'AED', denominations: ['100'],
+          scanCompletedAt: new Date(completedAt), productId, providerId: 'SYNTH_PROVIDER_A',
+          offerId: 'fixture-usd-offer', snapshotId: commercialSnapshot };
+        const requestWithCommercialSource = { ...request, tenantId: otherTenantId, evaluatedAt: now.toISOString(), idempotencyKey: randomUUID(),
+          sourceSnapshots: [{ snapshotId: commercialSnapshot, providerAccountId: commercialAccount, snapshotKey: 'commercial-snapshot',
+            sourceVersion: 'synthetic-v1', observedAt, completedAt, status: 'COMPLETE' as const }],
+          offers: [{ ...request.offers[0]!, snapshotId: commercialSnapshot, offerId: binding.offerId, observedAt, validUntil }] };
+        const quote = { version: 2, ...scope, sourceProductId, discoveryId, market: 'ARE', denomination: '100.00',
+          settlementCurrency: 'USD', walletDebit: '25.00', additionalFee: '0.13', available: true,
+          evidenceReference: 'fixture-quote', fxRateReference: 'fixture-fx', observedAt, validUntil };
+        const fx = { expectedSource: 'fixture-source', evidence: { ...scope, commercialEvidenceReference: quote.evidenceReference,
+          rateReference: quote.fxRateReference, source: 'fixture-source', baseCurrency: 'USD', quoteCurrency: 'AED',
+          aedPerUsd: '3.84', observedAt, validUntil } };
+        const review = prepareAedCommercialPriceDraft(quote, binding, requestWithCommercialSource, now, 3_600_000, fx);
+        await assert.rejects(() => store!.saveCommercialReview({ ...review }), /Untrusted/);
+
+        await owner.query(`CREATE FUNCTION nukhabapay.reject_test_commercial_evidence() RETURNS trigger
+          LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog AS $f$
+          BEGIN RAISE EXCEPTION 'synthetic evidence failure' USING ERRCODE='40001'; END $f$`);
+        await owner.query(`CREATE TRIGGER reject_test_commercial_evidence BEFORE INSERT ON nukhabapay.price_commercial_draft_evidence
+          FOR EACH ROW EXECUTE FUNCTION nukhabapay.reject_test_commercial_evidence()`);
+        try {
+          await assert.rejects(() => store!.saveCommercialReview(review), { code: '40001' });
+          const { rows: [record] } = await fixture.fixtureClient.query(`SELECT
+            (SELECT count(*)::int FROM nukhabapay.catalogue_publication_candidates WHERE candidate_id=$1) AS drafts,
+            (SELECT count(*)::int FROM nukhabapay.catalogue_publication_requests WHERE candidate_id=$1) AS requests,
+            (SELECT count(*)::int FROM nukhabapay.catalogue_publication_events WHERE candidate_id=$1) AS events`, [review.draft.candidateId]);
+          assert.deepEqual(record, { drafts: 0, requests: 0, events: 0 });
+        } finally {
+          await owner.query('DROP TRIGGER reject_test_commercial_evidence ON nukhabapay.price_commercial_draft_evidence');
+          await owner.query('DROP FUNCTION nukhabapay.reject_test_commercial_evidence()');
+        }
+
+        const receipts = await Promise.all([store!.saveCommercialReview(review), store!.saveCommercialReview(review)]);
+        assert.deepEqual(receipts.map(receipt => receipt.outcome).sort(), ['CREATED', 'REPLAYED']);
+        assert.ok(receipts.every(receipt => receipt.reviewDigest === review.reviewDigest && receipt.execution === 'NOT_AUTHORIZED'));
+        const changed = prepareAedCommercialPriceDraft({ ...quote, evidenceReference: 'other-quote' }, binding,
+          requestWithCommercialSource, now, 3_600_000,
+          { ...fx, evidence: { ...fx.evidence, commercialEvidenceReference: 'other-quote' } });
+        await assert.rejects(() => store!.saveCommercialReview(changed), PublicationDraftConflictError);
+        const { rows: [evidence] } = await fixture.fixtureClient.query(`SELECT e.review_digest, e.commercial_payload,
+          EXISTS(SELECT FROM nukhabapay.price_submission_evidence s WHERE s.candidate_id=e.candidate_id) AS submitted,
+          EXISTS(SELECT FROM nukhabapay.price_workflow_versions v WHERE v.candidate_id=e.candidate_id) AS published
+          FROM nukhabapay.price_commercial_draft_evidence e WHERE e.candidate_id=$1`, [review.draft.candidateId]);
+        assert.deepEqual(evidence, { review_digest: review.reviewDigest, commercial_payload: review.cost.canonicalPayload,
+          submitted: false, published: false });
+        await writer!.query('BEGIN');
+        try {
+          await writer!.query("SELECT set_config('nukhabapay.publication_tenant_id',$1,true)", [tenantId]);
+          assert.equal((await writer!.query('SELECT 1 FROM nukhabapay.price_commercial_draft_evidence')).rowCount, 0);
+        } finally { await writer!.query('ROLLBACK'); }
+        await assert.rejects(() => fixture.fixtureClient.query('TRUNCATE nukhabapay.price_commercial_draft_evidence'), { code: '42501' });
       });
     } finally {
       await writer?.end().catch(()=>undefined);await store?.close().catch(()=>undefined);await owner.end().catch(()=>undefined);

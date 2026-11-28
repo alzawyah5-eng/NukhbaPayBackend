@@ -10,5 +10,12 @@ price. Keep source timestamps, provider snapshot references, policy versions,
 and model/rule versions. Measure false alarms and missed issues on reviewed
 history before enabling additional automation.
 
+Inputs include time-ordered provider acquisition prices and approved FX
+snapshots with source versions. The output is an advisory flag with its
+evidence and rule or model version. Isolation Forest is a candidate for later
+evaluation alongside deterministic checks. Use the
+[model lifecycle boundary](../model_lifecycle/README.md) to compare both on
+reviewed data.
+
 No anomaly model, financial formula, or publication operation is implemented in
 this directory yet.

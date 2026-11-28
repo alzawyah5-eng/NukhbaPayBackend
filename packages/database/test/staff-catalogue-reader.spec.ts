@@ -110,7 +110,7 @@ test('private stored economics preserve exact amounts and require fresh pricing 
 test('catalogue read discards a connection with uncertain commit and withholds audit and response', async () => {
   const f = fixture();
   f.failCommit();
-  await assert.rejects(f.service.read(f.identity, f.tenant, 'products', {}), /Catalogue reader unavailable/);
+  await assert.rejects(f.service.read(f.identity, f.tenant, 'products', {}), { status: 503 });
   assert.equal(f.seen.at(-1)?.query, 'ROLLBACK');
   assert.deepEqual(f.releases, [true]);
   assert.equal(f.audits(), 0);

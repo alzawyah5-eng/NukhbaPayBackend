@@ -5,6 +5,11 @@ The semantic model gateway and FastAPI HTTP service are planned integration
 points. No language model is called, and no price, quote, order, or ledger write
 is performed by this package.
 
+Planned advisory modules cover [success prediction](src/nukhbapay_ai/success_prediction/README.md),
+[selection recommendations](src/nukhbapay_ai/selection_advice/README.md) and
+[model lifecycle](src/nukhbapay_ai/model_lifecycle/README.md). The existing
+stdio worker and offline matching tests remain the integration reference.
+
 ## Responsibilities
 
 1. Receive sanitized, authenticated catalog jobs from the application worker.
