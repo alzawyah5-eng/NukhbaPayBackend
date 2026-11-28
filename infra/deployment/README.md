@@ -120,10 +120,13 @@ aws cloudformation deploy --profile nukhbapay-staging --region eu-north-1 `
 3. Run the staging catalogue restore task against the approved snapshot. The
    RDS catalogue database comment is
    `nukhbapay-catalogue-staging:<id>`, with its 32-character hex ID supplied
-   in the catalogue reader secret. Provision the staff schema and enroll
-   approved staging staff separately. The staff session schema must bind the
-   Auth0 test issuer. The staff, catalogue, and Auth0 secrets are separate
-   bindings in the service template.
+   in the catalogue reader secret. The [staff database task](aws/staging-staff-database.yaml)
+   creates the staff schema and verifies the three restricted runtime roles.
+   It expects the staging-only connection strings in
+   `nukhbapay/staging/staff/database` and uses the RDS-managed administrator
+   secret for setup. Enroll approved staging staff after the schema is ready.
+   The staff session schema binds the Auth0 test issuer. The staff, catalogue,
+   and Auth0 secrets are separate bindings in the service template.
 4. Move the Windows provider launchers and scheduled task into ECS jobs. Preserve
    the Finxplor resume checkpoints, iPay versioned imports, and exact AED
    conversion policy. Verify account scope for each test provider.

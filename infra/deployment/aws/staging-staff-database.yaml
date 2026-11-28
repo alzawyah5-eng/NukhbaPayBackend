@@ -1,0 +1,93 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Initialize and verify the private AWS staging staff database with a one-shot ECS task.
+
+Parameters:
+  DatabaseHost:
+    Type: String
+    AllowedPattern: 'nukhbapay-staging-postgres\.[a-z0-9]+\.eu-north-1\.rds\.amazonaws\.com'
+  ImageDigest:
+    Type: String
+    AllowedPattern: 'sha256:[a-f0-9]{64}'
+  MasterSecretArn:
+    Type: String
+    AllowedPattern: 'arn:aws:secretsmanager:eu-north-1:[0-9]{12}:secret:rds!db-.+'
+  RuntimeSecretArn:
+    Type: String
+    AllowedPattern: 'arn:aws:secretsmanager:eu-north-1:[0-9]{12}:secret:nukhbapay/staging/staff/database-[A-Za-z0-9]{6}'
+
+Resources:
+  Logs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /nukhbapay/staging/staff-database
+      RetentionInDays: 7
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*'
+      Policies:
+        - PolicyName: InitializeRestrictedStaffDatabase
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action: [ecr:BatchGetImage, ecr:GetDownloadUrlForLayer, ecr:BatchCheckLayerAvailability]
+                Resource: !Sub 'arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/nukhbapay/staging-app'
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !GetAtt Logs.Arn
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: [!Ref MasterSecretArn, !Ref RuntimeSecretArn]
+  StaffSetupTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: nukhbapay-staging-staff-database
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: '512'
+      Memory: '1024'
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: staff-database
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.${AWS::URLSuffix}/nukhbapay/staging-app@${ImageDigest}'
+          Command: [node, scripts/setup-aws-staging-staff-database.mjs]
+          ReadonlyRootFilesystem: true
+          Environment:
+            - Name: NUKHBAPAY_STAGING_RDS_HOST
+              Value: !Ref DatabaseHost
+          Secrets:
+            - Name: STAGING_DB_USERNAME
+              ValueFrom: !Sub '${MasterSecretArn}:username::'
+            - Name: STAGING_DB_PASSWORD
+              ValueFrom: !Sub '${MasterSecretArn}:password::'
+            - Name: DB_IDENTITY_READER_URL
+              ValueFrom: !Sub '${RuntimeSecretArn}:DB_IDENTITY_READER_URL::'
+            - Name: DB_IDENTITY_WRITER_URL
+              ValueFrom: !Sub '${RuntimeSecretArn}:DB_IDENTITY_WRITER_URL::'
+            - Name: DB_STAFF_SESSION_URL
+              ValueFrom: !Sub '${RuntimeSecretArn}:DB_STAFF_SESSION_URL::'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref Logs
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: setup
+
+Outputs:
+  TaskDefinition:
+    Value: !Ref StaffSetupTask

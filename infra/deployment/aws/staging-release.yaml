@@ -61,7 +61,7 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
-                token.actions.githubusercontent.com:sub: repo:alzawyah5-eng/NukhbaPayBackend:ref:refs/heads/staging
+                token.actions.githubusercontent.com:sub: repo:alzawyah5-eng@352805084/NukhbaPayBackend@1469862288:ref:refs/heads/staging
       Policies:
         - PolicyName: UploadBackendSource
           PolicyDocument:
@@ -85,7 +85,7 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
-                token.actions.githubusercontent.com:sub: repo:alzawyah5-eng/NukhbaPayFrontend:ref:refs/heads/staging
+                token.actions.githubusercontent.com:sub: repo:alzawyah5-eng@352805084/NukhbaPayFrontend@1469861340:ref:refs/heads/staging
       Policies:
         - PolicyName: UploadFrontendSource
           PolicyDocument:
