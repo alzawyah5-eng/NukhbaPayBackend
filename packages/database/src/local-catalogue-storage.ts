@@ -1,18 +1,30 @@
 import { Pool, type PoolClient } from 'pg';
 import { administrationUuid, type ConfiguredAvailability, type FinxplorAcquisitionSummary, type FinxplorLayer1Price } from '@nukhbapay/application';
 import { createStaffCatalogueReader } from './staff-catalogue-reader.js';
+import { type AwsStagingTarget, verifyAwsStagingConnection } from './aws-staging-target.js';
+
+type CatalogueStorageSettings = Readonly<{ setupId: string; databaseOid?: string; password: string }>;
 
 /** Restricted read composition for the dedicated Windows development database. */
 export async function createLocalCatalogueStorage(
-  config: Readonly<{ setupId: string; databaseOid?: string; password: string }>,
+  config: CatalogueStorageSettings,
   availability: ReadonlyMap<string, readonly ConfiguredAvailability[]>,
 ) {
-  if (process.platform !== 'win32' || !/^[a-f0-9]{32}$/.test(config.setupId) ||
+  return openCatalogueStorage(config,availability);
+}
+
+export async function createAwsStagingCatalogueStorage(config:CatalogueStorageSettings, target:AwsStagingTarget) {
+  return openCatalogueStorage(config,new Map(),target);
+}
+
+async function openCatalogueStorage(config:CatalogueStorageSettings,
+  availability:ReadonlyMap<string,readonly ConfiguredAvailability[]>, staging?:AwsStagingTarget) {
+  if ((!staging && process.platform !== 'win32') || !/^[a-f0-9]{32}$/.test(config.setupId) ||
       (config.databaseOid !== undefined && !/^[1-9][0-9]{0,9}$/.test(config.databaseOid)) ||
       !/^[a-f0-9]{64}$/.test(config.password)) throw new Error('Invalid local catalogue configuration');
 
-  const pool = new Pool({ host: '127.0.0.1', port: 5432, database: 'nukhbapay_catalogue',
-    user: 'nukhbapay_catalogue_reader', password: config.password, ssl: false,
+  const pool = new Pool({ host: staging?.host ?? '127.0.0.1', port: 5432, database: 'nukhbapay_catalogue',
+    user: 'nukhbapay_catalogue_reader', password: config.password, ssl: false, ...staging?.poolOptions,
     options: '-c search_path=pg_catalog -c default_transaction_read_only=on -c statement_timeout=8000',
     application_name: 'nukhbapay-local-catalogue-reader', max: 2, connectionTimeoutMillis: 5000 });
   pool.on('error', () => { /* The next checkout revalidates the database and role. */ });
@@ -21,15 +33,19 @@ export async function createLocalCatalogueStorage(
   async function connect(): Promise<PoolClient> {
     const client = await pool.connect();
     try {
+      if (staging)await verifyAwsStagingConnection(client,'nukhbapay_catalogue','nukhbapay_catalogue_reader');
       const { rows: [result] } = await client.query<{ ready: boolean; oid: string }>(`SELECT db.oid::text AS oid,
         current_database()='nukhbapay_catalogue' AND ($1::text IS NULL OR db.oid::text=$1)
         AND shobj_description(db.oid,'pg_database')=$2 AND pg_get_userbyid(db.datdba)='nukhbapay_catalogue_migrator'
-        AND host(inet_server_addr())='127.0.0.1' AND inet_server_port()=5432
-        AND current_user='nukhbapay_catalogue_reader' AND system_user='scram-sha-256:nukhbapay_catalogue_reader'
+        AND ($3::boolean OR host(inet_server_addr())='127.0.0.1') AND inet_server_port()=5432
+        AND current_user='nukhbapay_catalogue_reader' AND ($3::boolean OR system_user='scram-sha-256:nukhbapay_catalogue_reader')
         AND current_setting('default_transaction_read_only')='on'
         AND NOT (r.rolsuper OR r.rolinherit OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls)
-        AND NOT EXISTS(SELECT FROM pg_auth_members m WHERE m.member=r.oid OR m.roleid=r.oid)
-        AND NOT has_database_privilege(current_user,'nukhbapay_staff','CONNECT')
+        AND NOT EXISTS(SELECT FROM pg_auth_members m WHERE m.member=r.oid OR (m.roleid=r.oid AND NOT (
+          $3::boolean AND coalesce(m.member=to_regrole('stagingadmin'),false)
+          AND m.admin_option AND NOT m.set_option AND NOT m.inherit_option)))
+        AND NOT EXISTS(SELECT FROM pg_database legacy
+          WHERE legacy.datname='nukhbapay_staff' AND has_database_privilege(current_user,legacy.oid,'CONNECT'))
         AND (SELECT count(*)=14 AND bool_and(c.relrowsecurity AND c.relforcerowsecurity
           AND pg_get_userbyid(c.relowner)='nukhbapay_catalogue_migrator'
           AND NOT has_table_privilege(current_user,c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER')
@@ -40,7 +56,7 @@ export async function createLocalCatalogueStorage(
             'price_workflow_versions','price_workflow_audit','catalogue_discoveries',
             'catalogue_discovery_scans','catalogue_discovery_scan_items')) AS ready
         FROM pg_database db JOIN pg_roles r ON r.rolname=current_user WHERE db.datname=current_database()`,
-        [databaseOid ?? null, `nukhbapay-catalogue-local:${config.setupId}`]);
+        [databaseOid ?? null, `nukhbapay-catalogue-${staging?'staging':'local'}:${config.setupId}`,Boolean(staging)]);
       if (result?.ready !== true) throw new Error('Unexpected local catalogue database or reader');
       databaseOid ??= result.oid;
       return client;

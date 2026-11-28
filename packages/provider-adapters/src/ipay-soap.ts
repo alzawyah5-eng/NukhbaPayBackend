@@ -69,46 +69,77 @@ function parseXml(input: string, allowAttributes = false): Element {
   return root;
 }
 
-type ProductFileBinding = Readonly<{ rootElement: string; groupNumber: string }>;
+export type IpayProductFileBinding = Readonly<{
+  rootElement: string;
+  groupNumber: string;
+  format?: 'qore3-product-file';
+}>;
 const decimal = /^(?:0|[1-9][0-9]{0,19})(?:\.[0-9]{1,8})?$/;
 const productCode = /^[A-Za-z0-9]{1,12}$/;
+const metadataNumber = /^\d{1,20}$/;
+const placeholderTypes = new Set(['TV', 'TT', 'DN', 'VP', 'PV', 'B1']);
 const displayText = (value: unknown): value is string => typeof value === 'string' && value.trim() !== '' &&
   value.length <= 160 && !/[\x00-\x1f\x7f]/.test(value);
 
-export function isIpayProductFileBinding(binding: ProductFileBinding): boolean {
+export function isIpayProductFileBinding(binding: IpayProductFileBinding): boolean {
   return typeof binding.rootElement === 'string' && xmlName.test(binding.rootElement) &&
-    typeof binding.groupNumber === 'string' && /^\d{1,20}$/.test(binding.groupNumber);
+    typeof binding.groupNumber === 'string' && metadataNumber.test(binding.groupNumber) &&
+    (binding.format === undefined || binding.format === 'qore3-product-file');
 }
 
-/** Project the SDK's documented product fields. The assigned feed must confirm the root element. */
-export function decodeIpayProductFile(input: unknown, binding: ProductFileBinding, version: unknown) {
+function productFileField(parent: Element, name: string) {
+  const fields = parent.children.filter(child => child.uri === '' && child.local === name);
+  const field = fields[0];
+  if (fields.length !== 1 || !field || field.children.length || Object.keys(field.attributes).length ||
+      !metadataNumber.test(field.text)) throw invalid();
+  return field.text;
+}
+
+/** Project denominations and scope from the selected product file format. */
+export function decodeIpayProductFile(input: unknown, binding: IpayProductFileBinding, version: unknown) {
   if (typeof input !== 'string' || Buffer.byteLength(input) > 2 * 1024 * 1024 ||
-      typeof version !== 'string' || !/^\d{1,20}$/.test(version)) throw invalid();
-  const root = parseXml(input,true);
-  if (root.local !== binding.rootElement || root.uri !== '' || root.attributes['GroupNumber'] !== binding.groupNumber ||
-      root.attributes['ProductVersion'] !== version) throw invalid();
+      typeof version !== 'string' || !metadataNumber.test(version)) throw invalid();
+  const qore = binding.format === 'qore3-product-file';
+  let document = input.trim();
+  if (qore && document.startsWith('<![CDATA[')) {
+    if (!document.endsWith(']]>') || document.indexOf(']]>') !== document.length - 3) throw invalid();
+    document = document.slice(9, -3);
+  }
+  const root = parseXml(document, true);
+  if (root.local !== binding.rootElement || root.uri !== '') throw invalid();
+  const groupNumber = qore ? productFileField(root, 'GroupNumber') : root.attributes['GroupNumber'];
+  const fileVersion = qore ? productFileField(root, 'ProductVersion') : root.attributes['ProductVersion'];
+  if (groupNumber !== binding.groupNumber || (qore ? groupNumber + fileVersion : fileVersion) !== version) throw invalid();
+  const categories = root.children.filter(child => child.uri === '' && child.local === 'Category');
+  if (qore && productFileField(root, 'NumberOfCategories') !== String(categories.length)) throw invalid();
   const products = [];
   const seen = new Set<string>();
-  for (const group of root.children) {
-    if (group.uri !== '' || group.local !== 'Category') continue;
+  for (const group of categories) {
     const name = group.attributes['Name'];
     const entries = group.children.filter(item => item.uri === '' && item.local === 'Product');
     if (!displayText(name) || group.attributes['Products'] !== String(entries.length)) throw invalid();
     for (const item of entries) {
-      const { ProductCode: code, Name: title, StoreGUI: sourceType, AmountLimit: amountLimit, Amounts: count } = item.attributes;
+      const { ProductCode: code, Name: title, StoreGUI: sourceType, AmountLimit: limit, Amounts: count, CurrencyCode: currency } = item.attributes;
+      const amountLimit = limit ?? (qore ? '0' : undefined);
       const amounts = item.children.filter(child => child.uri === '' && child.local === 'Amount');
       if (!code || !productCode.test(code) || seen.has(code) || !displayText(title) || !sourceType || !/^[A-Za-z0-9]{1,16}$/.test(sourceType) ||
           typeof amountLimit !== 'string' || !decimal.test(amountLimit) || amounts.length > 7 ||
+          (qore && (!currency || !/^[A-Z]{3}$/.test(currency))) ||
           (count !== String(amounts.length) && !(count === undefined && sourceType === 'TV' && amounts.length === 0))) throw invalid();
       seen.add(code);
-      const values = amounts.map(amount => {
+      const values = amounts.flatMap(amount => {
         const value = amount.attributes['Value'], upc = amount.attributes['UpcNumber'];
-        if (typeof value !== 'string' || !decimal.test(value) || !/[1-9]/.test(value) ||
+        if (typeof value !== 'string' || !decimal.test(value) ||
             (upc !== undefined && !/^\d{1,18}$/.test(upc))) throw invalid();
-        return Object.freeze({ value, ...(upc === undefined ? {} : { upc }) });
+        if (!/[1-9]/.test(value)) {
+          if (qore && amounts.length === 1 && placeholderTypes.has(sourceType)) return [];
+          throw invalid();
+        }
+        return [Object.freeze({ value, ...(upc === undefined ? {} : { upc }) })];
       });
       if (new Set(values.map(entry => entry.value.replace(/(\.\d*?[1-9])0+$|\.0+$/, '$1'))).size !== values.length) throw invalid();
-      products.push(Object.freeze({ code, title, category: name, sourceType, amountLimit, amounts: Object.freeze(values) }));
+      products.push(Object.freeze({ code, title, category: name, sourceType, amountLimit, ...(qore ? { currency } : {}),
+        amounts: Object.freeze(values) }));
     }
   }
   if (!products.length) throw invalid();

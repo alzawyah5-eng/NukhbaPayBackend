@@ -1,5 +1,6 @@
 import { withinCatalogueDeadline } from './catalogue-http.ts';
-import { decodeIpayProductFile, isIpayProductFileBinding, takeIpayIssuedPin, type IpayIssuedPin } from './ipay-soap.ts';
+import { decodeIpayProductFile, isIpayProductFileBinding, takeIpayIssuedPin, type IpayIssuedPin,
+  type IpayProductFileBinding } from './ipay-soap.ts';
 export { createIpaySoapProcess } from './ipay-soap.ts';
 
 export interface IpayAccount {
@@ -47,7 +48,7 @@ interface Options {
   readonly language?: string;
   /** The SDK table and its worked request differ in case. Supply the selector verified for this account. */
   readonly pinAvailabilityType?: 'PinAvlb' | 'pinavlb';
-  readonly productFile?: Readonly<{ rootElement: string; groupNumber: string }>;
+  readonly productFile?: IpayProductFileBinding;
   readonly pinlessProducts?: readonly string[];
   /** Exact transfer code authorized by the vendor for this terminal. The SDK table and example differ. */
   readonly ecashTransferProduct?: 'EFRDEP' | 'EFECSH';

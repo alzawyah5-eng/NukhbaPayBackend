@@ -1,9 +1,10 @@
 import { createServer, type Server } from "node:https";
+import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { AdministrationError, administrationUuid, staffWorkspaceViews, type StaffCatalogueService, type StaffCatalogueView,
   type StaffManagementService, type StaffWorkspaceService, type StaffWorkspaceView } from "@nukhbapay/application";
-import { Auth0Login, TRANSACTION_COOKIE_NAME, transactionCookie } from "./auth0.js";
+import { Auth0Login, AWS_STAGING_STAFF_ORIGIN, TRANSACTION_COOKIE_NAME, transactionCookie } from "./auth0.js";
 import { createStaffCommandAdmission, type StaffPublicationPort, type StaffSuspensionPort } from "./staff-command-admission.js";
 import { createPlatformStaffCommandAdmission, type PlatformStaffPilotPort } from './platform-staff-step-up.js';
 import { browserAsset, developmentPreviewEnabled, type BrowserAssets } from './browser-assets.js';
@@ -53,9 +54,13 @@ function htmlLogoutPolicy(body:Buffer,destination:string):Buffer {
 type FxRefreshResult = {status:'not-configured'|'already-running'} |
   {status:'completed';ratesFetched:number;converted:number;pending:number;failedCurrencies:number};
 
-/** Trusted server DI only. CLI supplies neither sessions nor login. */
-export async function createStaffPortal(options:{
-  readonly pfx:Buffer;readonly certificate:Buffer;readonly passphrase:string;readonly port?:number;readonly sessions?:InternalSessionPort;
+type StaffListener =
+  { readonly pfx:Buffer; readonly certificate:Buffer; readonly passphrase:string; readonly staging?:never } |
+  { readonly staging:{ readonly checkReadiness:()=>Promise<boolean> }; readonly pfx?:never; readonly certificate?:never; readonly passphrase?:never };
+
+/** The staging listener is reachable through the HTTPS load balancer's security group. */
+export async function createStaffPortal(options:StaffListener & {
+  readonly port?:number;readonly sessions?:InternalSessionPort;
   readonly login?:Auth0Login;
   readonly staffCatalogue?: Pick<StaffCatalogueService,"read"> & Partial<Pick<StaffCatalogueService,"available">>;
   readonly staffManagement?: Pick<StaffManagementService,"read"> & Partial<Pick<StaffManagementService,"availableViews">>;
@@ -69,11 +74,13 @@ export async function createStaffPortal(options:{
     discoveryIds: readonly string[], includeAmounts: boolean) =>
     Promise<ReadonlyMap<string, FinxplorAcquisitionSummary>>;
   readonly refreshFxRates?: (tenantId:string)=>Promise<FxRefreshResult>;
+  readonly syncIpayCatalogue?: (tenantId:string)=>Promise<{products:number;inserted:number;unchanged:number}>;
   readonly syncCatalogue?: (tenantId:string)=>Promise<{products:number;inserted:number;unchanged:number;nextPage?:number;verificationPending?:boolean;verificationMismatch?:boolean;layer1?:{amounts:number;pendingFx:number}|null}>;
   readonly staffSuspension?: StaffSuspensionPort;
   readonly staffPublication?: StaffPublicationPort;
   readonly platformStaffPilot?: PlatformStaffPilotPort;
   readonly browserAssets?:BrowserAssets;
+  readonly kioskAssets?:BrowserAssets;
   readonly environment?:Readonly<Record<string,string|undefined>>;
 }) {
   const port=options.port??3001;
@@ -81,13 +88,17 @@ export async function createStaffPortal(options:{
   const previewEnabled=developmentPreviewEnabled(environment);
   const workspaceService=options.staffWorkspace;
   const departmentAccess=options.departmentAccess;
+  const staging=options.staging;
+  if (staging && (environment['NUKHBAPAY_ENVIRONMENT']!=='aws-staging' || environment['NODE_ENV']!=='production' ||
+      options.login?.origin!==AWS_STAGING_STAFF_ORIGIN || !options.sessions || !options.staffCatalogue ||
+      !departmentAccess || !options.browserAssets || options.windowsStaffStorageReady || options.localCataloguePreview)) throw unavailable();
   if(options.windowsStaffStorageReady && (!departmentAccess || !options.login || !options.sessions || previewEnabled))throw unavailable();
   if(options.localCataloguePreview && (!options.windowsStaffStorageReady || !options.staffCatalogue?.available ||
       !departmentAccess || environment['NODE_ENV']!=='development' || previewEnabled))throw unavailable();
   if(departmentAccess && (!workspaceService || !options.login || options.staffPublication ||
     options.staffSuspension || options.platformStaffPilot))throw unavailable();
   if(workspaceService && (!options.login || options.login.platformScope || !options.sessions ||
-      environment['NODE_ENV']!=='development' || previewEnabled))throw unavailable();
+      environment['NODE_ENV']!=='development' && !staging || previewEnabled))throw unavailable();
   const suspension=options.staffSuspension;
   if (suspension && (!options.login || !options.sessions || suspension.capability!=='DISPOSABLE_STAFF_EFFECT_V1' ||
       environment['NODE_ENV']==='production')) throw unavailable();
@@ -102,9 +113,9 @@ export async function createStaffPortal(options:{
   const platformCommands=platform && options.login ? createPlatformStaffCommandAdmission(options.login,platform) : undefined;
   const commands=(suspension || publication) && options.login ? createStaffCommandAdmission(options.login,suspension,publication) : undefined;
   if(options.login && !options.sessions || (options.staffCatalogue || options.staffManagement) && !options.login)throw unavailable();
-  const certificate=validateDevelopmentCertificate(options.certificate);
-  if(!Number.isInteger(port)||port<0||port>65535 || !Buffer.isBuffer(options.pfx) || !options.passphrase)throw unavailable();
-  let origin="";const csrfKey=randomBytes(32);
+  const certificate=staging ? undefined : validateDevelopmentCertificate(options.certificate!);
+  if(!Number.isInteger(port)||port<0||port>65535 || !staging && (!Buffer.isBuffer(options.pfx) || !options.passphrase))throw unavailable();
+  let origin=staging ? AWS_STAGING_STAFF_ORIGIN : "";const csrfKey=randomBytes(32);
   const csrf=(token:string)=>createHmac("sha256",csrfKey).update(token).digest("base64url");
   const sameOrigin=(req:IncomingMessage)=>req.headers.host===new URL(origin).host &&
     (!req.headersDistinct['origin'] || req.headersDistinct['origin'].length===1 && req.headers.origin===origin) &&
@@ -113,9 +124,9 @@ export async function createStaffPortal(options:{
   const send=(res:ServerResponse,status:number,body:string|Buffer,type="application/json")=>{
     res.writeHead(status,{"content-type":type+"; charset=utf-8"});res.end(body);
   };
-  let server:Server;
+  let server:Server|HttpServer;
   try {
-    server=createServer({pfx:options.pfx,passphrase:options.passphrase,minVersion:"TLSv1.2",maxHeaderSize:8192},(req,res)=>{
+    const handleRequest=(req:IncomingMessage,res:ServerResponse)=>{
       res.setHeader("Cache-Control","no-store");res.setHeader("X-Content-Type-Options","nosniff");
       res.setHeader("Referrer-Policy","no-referrer");
       res.setHeader("Content-Security-Policy","default-src 'none'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
@@ -124,6 +135,14 @@ export async function createStaffPortal(options:{
         res.setHeader('Content-Security-Policy',`default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'${media}; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`);
       }
       void (async()=>{
+        if (staging && req.method==='GET' && req.url==='/health/ready') {
+          const ready=await staging.checkReadiness().catch(()=>false);
+          res.writeHead(ready?200:503).end();
+          return;
+        }
+        if (staging && (req.headersDistinct['x-forwarded-proto']?.length!==1 || req.headers['x-forwarded-proto']!=='https')) {
+          send(res,403,'{"error":"Request denied"}');return;
+        }
         if(req.headers.host!==new URL(origin).host || req.rawHeaders.length>128 || req.headersDistinct['host']?.length!==1){send(res,400,'{"error":"Invalid request"}');return;}
         // Browsers can carry the provider's cross-site marker through the callback's redirect to the public shell.
         const documentNavigation=req.headersDistinct['sec-fetch-mode']?.length===1 && req.headers['sec-fetch-mode']==='navigate' &&
@@ -237,14 +256,19 @@ export async function createStaffPortal(options:{
             ...(workspace && positions && {departmentAccess:{positions:positions.map(({department,role})=>({department,role})),
               selected:selected?{department:selected.department,role:selected.role}:null}}),
             ...(workspace && {csrfToken:csrf(token)}),
-            ...(workspace && options.refreshFxRates && navigation.includes('/catalogue') &&
-              selected?.role==='TENANT_STAFF_MANAGER' && {canRefreshFxRates:true})}));return;
+            ...(workspace && navigation.includes('/catalogue') && selected?.role==='TENANT_STAFF_MANAGER' && {
+              ...(options.refreshFxRates && {canRefreshFxRates:true}),
+              ...(options.syncIpayCatalogue && {canSyncIpayCatalogue:true}),
+            })}));return;
         }
-        if(req.method==='POST' && (req.url==='/staff-api/catalogue/sync' || req.url==='/staff-api/catalogue/refresh-rates')) {
+        if(req.method==='POST' && (req.url==='/staff-api/catalogue/sync' || req.url==='/staff-api/catalogue/refresh-rates' ||
+            req.url==='/staff-api/catalogue/sync-ipay')) {
           const refreshFx = req.url==='/staff-api/catalogue/refresh-rates';
+          const syncIpay = req.url==='/staff-api/catalogue/sync-ipay';
+          const sync = syncIpay ? options.syncIpayCatalogue : options.syncCatalogue;
           const token=sessionCookie(req), proof=req.headersDistinct['x-csrf-token'];
           if(!token){send(res,401,'{"error":"Authentication required"}');return;}
-          if(!(refreshFx ? options.refreshFxRates : options.syncCatalogue) || !options.login || !options.staffCatalogue ||
+          if(!(refreshFx ? options.refreshFxRates : sync) || !options.login || !options.staffCatalogue ||
              req.headersDistinct['origin']?.length!==1 || req.headers.origin!==origin ||
              proof?.length!==1 || !tokenPattern.test(proof[0]!) ||
              !timingSafeEqual(Buffer.from(proof[0]!),Buffer.from(csrf(token))) ||
@@ -255,20 +279,18 @@ export async function createStaffPortal(options:{
             if((await selectedPosition(token))?.role!=='TENANT_STAFF_MANAGER') {
               send(res,403,'{"error":"Request denied"}');return;
             }
-            req.socket.setTimeout(refreshFx ? 425_000 : 785_000);
+            req.socket.setTimeout(refreshFx ? 425_000 : syncIpay ? 45_000 : 785_000);
             const result=await options.login.readForSession(token,async(identity,tenantId,_staffId,revalidate)=>{
               await options.staffCatalogue!.read(identity,tenantId,'discovery-providers',{limit:'1'});
-              if (refreshFx) {
-                if (!await revalidate() || (await selectedPosition(token))?.role!=='TENANT_STAFF_MANAGER') {
-                  throw new AdministrationError(403);
-                }
-                return options.refreshFxRates!(tenantId);
+              if ((refreshFx || syncIpay) && (!await revalidate() || (await selectedPosition(token))?.role!=='TENANT_STAFF_MANAGER')) {
+                throw new AdministrationError(403);
               }
-              return {...await options.syncCatalogue!(tenantId),persisted:true};
+              if (refreshFx) return options.refreshFxRates!(tenantId);
+              return {...await sync!(tenantId),persisted:true};
             });
             send(res,200,JSON.stringify(result));
           } catch (error) {
-            if (refreshFx && error instanceof AdministrationError && error.status===403) {
+            if ((refreshFx || syncIpay) && error instanceof AdministrationError && error.status===403) {
               send(res,403,'{"error":"Request denied"}');
             } else send(res,503,JSON.stringify({error:refreshFx ? 'Exchange-rate refresh could not be confirmed.' :
               'Sync could not be completed. Existing saved products are retained.'}));
@@ -567,6 +589,12 @@ export async function createStaffPortal(options:{
           return;
         }
         if(req.method==='GET' && options.browserAssets && req.url){
+          const kiosk=staging && options.kioskAssets?.get(req.url==='/kiosk/'?'/kiosk':req.url);
+          if(kiosk){
+            res.setHeader('Content-Security-Policy',"default-src 'none'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
+            send(res,200,kiosk.body,kiosk.type);
+            return;
+          }
           const asset=browserAsset(options.browserAssets,req.url,previewEnabled);
           if(asset){send(res,200,asset.type==='text/html' && options.login?htmlLogoutPolicy(asset.body,options.login.logoutUrl):asset.body,asset.type);return;}
         }
@@ -602,18 +630,20 @@ export async function createStaffPortal(options:{
         }
         send(res,404,'{"error":"Not found"}');
       })().catch(()=>{if(!res.headersSent)send(res,503,'{"error":"Service unavailable"}');else res.destroy();});
-    });
+    };
+    server=staging ? createHttpServer({maxHeaderSize:8192},handleRequest) :
+      createServer({pfx:options.pfx!,passphrase:options.passphrase!,minVersion:"TLSv1.2",maxHeaderSize:8192},handleRequest);
     server.requestTimeout=10000;server.headersTimeout=10000;server.keepAliveTimeout=5000;server.maxHeadersCount=64;
     server.setTimeout(15000,socket=>socket.destroy());
     server.on("tlsClientError",()=>undefined);
-    await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',()=>{server.off('error',reject);resolve();});});
+    await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen(port,staging?'0.0.0.0':'127.0.0.1',()=>{server.off('error',reject);resolve();});});
   } catch {throw unavailable();}
   const address=server.address();if(!address || typeof address==='string')throw unavailable();
-  origin=`https://localhost:${address.port}`;
+  if(!staging)origin=`https://localhost:${address.port}`;
   if(options.login && options.login.origin!==origin){await new Promise<void>(resolve=>server.close(()=>resolve()));throw unavailable();}
   try {
     // Strict certificate/hostname/expiry verification also proves the PFX matches the reviewed public certificate.
-    await probeDevelopmentHttps(address.port,certificate);
+    if(certificate)await probeDevelopmentHttps(address.port,certificate);
   }catch{await new Promise<void>(resolve=>server.close(()=>resolve()));throw unavailable();}
   let closing:Promise<void>|undefined;
   return Object.freeze({origin,close:()=>closing??=new Promise<void>((resolve,reject)=>{commands?.close();platformCommands?.close();options.login?.close();server.close(error=>error?reject(unavailable()):resolve());server.closeIdleConnections();})});

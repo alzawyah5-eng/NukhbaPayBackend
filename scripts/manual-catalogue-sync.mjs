@@ -27,7 +27,7 @@ export function createManualCatalogueSync(expectedTenant) {
       const counts = {products:receipt.products,inserted:receipt.inserted,unchanged:receipt.unchanged,
         ...(partial && {nextPage:receipt.nextPage,verificationPending:receipt.verificationPending===true,verificationMismatch:receipt.verificationMismatch===true})};
       try {
-        const {stdout} = await runPriceRefresh('-RefreshFinxplorPrices',60_000);
+        const {stdout} = await runCatalogueOperation('-RefreshFinxplorPrices',60_000);
         const prices = JSON.parse(stdout.trim());
         if (prices?.result==='STORED' && Number.isSafeInteger(prices.rows) && Number.isSafeInteger(prices.awaiting_fx)) {
           return {...counts,layer1:{amounts:prices.rows,pendingFx:prices.awaiting_fx}};
@@ -43,17 +43,28 @@ export function createManualCatalogueSync(expectedTenant) {
  };
 }
 
-function runPriceRefresh(operation,timeout) {
+function runCatalogueOperation(operation,timeout) {
   return execute('powershell.exe', [
     '-NoProfile','-NonInteractive','-WindowStyle','Hidden','-ExecutionPolicy','RemoteSigned',
     '-File',fileURLToPath(new URL('./setup-windows-catalogue.ps1',import.meta.url)),operation,
   ],{cwd:fileURLToPath(new URL('../',import.meta.url)),windowsHide:true,timeout,maxBuffer:8192});
 }
 
+export function createManualIpaySync(expectedTenant) {
+  return async tenantId => {
+    if (tenantId !== expectedTenant) throw new Error('iPay catalogue sync unavailable');
+    const { stdout } = await runCatalogueOperation('-SyncIpay', 40_000);
+    const { products, inserted, unchanged, persisted } = JSON.parse(stdout.trim());
+    if (persisted !== true || ![products, inserted, unchanged].every(count => Number.isSafeInteger(count) && count >= 0) ||
+        products === 0 || inserted + unchanged !== products) throw new Error('iPay catalogue sync unconfirmed');
+    return { products, inserted, unchanged };
+  };
+}
+
 export function createManualFxRefresh(expectedTenant) {
   return async tenantId => {
     if (tenantId !== expectedTenant) throw new Error('Exchange-rate refresh unavailable');
-    const {stdout} = await runPriceRefresh('-RefreshFinxplorPricesNow',420_000);
+    const {stdout} = await runCatalogueOperation('-RefreshFinxplorPricesNow',420_000);
     const result = JSON.parse(stdout.trim());
     if (result?.result === 'FX_NOT_CONFIGURED') return {status:'not-configured'};
     if (result?.result === 'ALREADY_RUNNING') return {status:'already-running'};

@@ -23,7 +23,7 @@ function invalid(field: string): never {
   throw new TypeError(`Invalid IAM runtime configuration: ${field}`);
 }
 
-function target(env: Environment, field: string, role: string): { url: string; host: string; port: number; database: string } {
+function target(env: Environment, field: string, role: string, stagingHost?:string): { url: string; host: string; port: number; database: string } {
   const text = env[field];
   if (typeof text !== "string" || text.length === 0 || text.length > 4096 || /\s/.test(text)) return invalid(field);
   let url: URL;
@@ -39,7 +39,8 @@ function target(env: Environment, field: string, role: string): { url: string; h
   const host = url.hostname.toLowerCase();
   const port = url.port === "" ? 5432 : Number(url.port);
   if (!["postgres:", "postgresql:"].includes(url.protocol) ||
-      !["127.0.0.1", "localhost", "[::1]"].includes(host) ||
+      !(stagingHost ? host===stagingHost && port===5432 && database==='nukhbapay_staff' :
+        ["127.0.0.1", "localhost", "[::1]"].includes(host)) ||
       url.search || url.hash || username !== role || !password ||
       !/^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(database) ||
       ["postgres", "template0", "template1"].includes(database) ||
@@ -59,13 +60,13 @@ function bounded(env: Environment, field: string, fallback: number, minimum: num
 }
 
 /** IAM-only local configuration. It never reads migration/import/runtime URLs. */
-export function parseIdentityRuntimeConfiguration(env: Environment): IdentityRuntimeConfiguration {
+export function parseIdentityRuntimeConfiguration(env: Environment, stagingHost?:string): IdentityRuntimeConfiguration {
   const readerRole = "nukhabapay_identity_reader";
   const writerRole = "nukhabapay_identity_writer";
   if (env["DB_IDENTITY_READER_ROLE"] !== undefined && env["DB_IDENTITY_READER_ROLE"] !== readerRole) return invalid("DB_IDENTITY_READER_ROLE");
   if (env["DB_IDENTITY_WRITER_ROLE"] !== undefined && env["DB_IDENTITY_WRITER_ROLE"] !== writerRole) return invalid("DB_IDENTITY_WRITER_ROLE");
-  const reader = target(env, "DB_IDENTITY_READER_URL", readerRole);
-  const writer = target(env, "DB_IDENTITY_WRITER_URL", writerRole);
+  const reader = target(env, "DB_IDENTITY_READER_URL", readerRole, stagingHost);
+  const writer = target(env, "DB_IDENTITY_WRITER_URL", writerRole, stagingHost);
   if (reader.host !== writer.host || reader.port !== writer.port || reader.database !== writer.database) {
     return invalid("IAM_TARGET_MISMATCH");
   }

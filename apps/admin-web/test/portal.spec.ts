@@ -147,6 +147,7 @@ test('department login scopes direct reads and writes to the selected live grant
   let currentDiscovery=true;
   let priceStorageDown = false;
   let xeRefreshRuns = 0;
+  let ipaySyncRuns = 0;
   const customerPrice = {basis:'CUSTOMER_PRICE',sourceKey:'test-price',sourceAmount:'3.17',
     sourceCurrency:'GBP',convertedAed:'16.24135802116804',rateSource:'CURRENCY_API'} as const;
   const app=await createStaffPortal({pfx,certificate,passphrase,port,environment:{NODE_ENV:'development'},login:integration.login,
@@ -162,6 +163,11 @@ test('department login scopes direct reads and writes to the selected live grant
       assert.equal(tenantId,config.tenantId);
       xeRefreshRuns++;
       return {status:'not-configured'};
+    },
+    syncIpayCatalogue:async tenantId=>{
+      assert.equal(tenantId,config.tenantId);
+      ipaySyncRuns++;
+      return {products:5,inserted:1,unchanged:4};
     },
     syncCatalogue:async tenantId=>{
       assert.equal(tenantId,config.tenantId);
@@ -274,6 +280,18 @@ test('department login scopes direct reads and writes to the selected live grant
     assert.equal(refreshed.status,200,refreshed.body);
     assert.deepEqual(JSON.parse(refreshed.body),{status:'not-configured'});
     assert.equal(xeRefreshRuns,1);
+    const ipayPath='/staff-api/catalogue/sync-ipay';
+    assert.equal(managerProfile.canSyncIpayCatalogue,true);
+    assert.equal(supportProfile.canSyncIpayCatalogue,undefined);
+    assert.equal((await call(origin,ipayPath,'POST')).status,401);
+    assert.equal((await call(origin,ipayPath,'POST',{...headers,cookie:activeCookie})).status,403);
+    assert.equal((await call(origin,ipayPath,'POST',{...headers,cookie:managerCookie,'x-csrf-token':'x'.repeat(43)})).status,403);
+    assert.equal((await call(origin,ipayPath,'POST',{...headers,cookie:managerCookie,origin:'https://other.invalid'})).status,403);
+    assert.equal(ipaySyncRuns,0);
+    const ipaySynced=await call(origin,ipayPath,'POST',{...headers,cookie:managerCookie});
+    assert.equal(ipaySynced.status,200,ipaySynced.body);
+    assert.deepEqual(JSON.parse(ipaySynced.body),{products:5,inserted:1,unchanged:4,persisted:true});
+    assert.equal(ipaySyncRuns,1);
     const pricing=await choose('catalogue','PRICING_EDITOR');
     assert.equal(pricing.status,204);
     const pricingCookie=cookie+'; '+pricing.headers['set-cookie']![0]!.split(';')[0];

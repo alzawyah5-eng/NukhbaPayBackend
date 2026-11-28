@@ -1,0 +1,59 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: AI NukhbaPay staging cluster, image repository, and application log groups.
+
+Resources:
+  StagingCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: nukhbapay-staging
+      ClusterSettings:
+        - Name: containerInsights
+          Value: disabled
+      Tags:
+        - Key: Application
+          Value: NukhbaPay
+        - Key: Environment
+          Value: staging
+
+  StagingImages:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: nukhbapay/staging-app
+      ImageTagMutability: IMMUTABLE
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      Tags:
+        - Key: Application
+          Value: NukhbaPay
+        - Key: Environment
+          Value: staging
+
+  StaffLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /nukhbapay/staging/staff
+      RetentionInDays: 7
+
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /nukhbapay/staging/api
+      RetentionInDays: 7
+
+  WorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /nukhbapay/staging/worker
+      RetentionInDays: 7
+
+Outputs:
+  ClusterName:
+    Value: !Ref StagingCluster
+  ImageRepositoryUri:
+    Value: !GetAtt StagingImages.RepositoryUri
+  StaffLogGroupName:
+    Value: !Ref StaffLogGroup
+  ApiLogGroupName:
+    Value: !Ref ApiLogGroup
+  WorkerLogGroupName:
+    Value: !Ref WorkerLogGroup

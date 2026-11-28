@@ -151,5 +151,10 @@
     "name": "local_finxplor_partial_generation_projection_025",
     "file": "025_finxplor_partial_generation_projection.sql",
     "sha256": "ef8700adc7928c912918b88a6eab1d662d18053701563f614ff13ab55d7b3f09"
+  },
+  {
+    "name": "local_ipay_product_file_coverage_026",
+    "file": "026_ipay_product_file_coverage.sql",
+    "sha256": "b645a60cea4027f2ca6a53de08cbe9cf772b5c2c228e29d8a1bbcd0f94216c66"
   }
 ]

@@ -1,4 +1,4 @@
-import {createManualCatalogueSync,createManualFxRefresh} from './manual-catalogue-sync.mjs';
+import {createManualCatalogueSync,createManualFxRefresh,createManualIpaySync} from './manual-catalogue-sync.mjs';
 import {existsSync, lstatSync, readFileSync} from 'node:fs';
 import {createHash} from 'node:crypto';
 import {isAbsolute, resolve} from 'node:path';
@@ -12,7 +12,7 @@ import {administrationUuid, createAdministrationAuthority, createStaffAdministra
 import {parseIdentityRuntimeConfiguration, createWindowsStaffIdentityRuntime, IdentityRuntimeUnavailableError} from '../packages/database/dist/database/src/identity-runtime.js';
 import {createIdentityReaderPool,createIdentityWriterPool,createLocalCatalogueStorage,createStaffAdministrationReader,createStaffWorkspaceStore} from '../packages/database/dist/database/src/index.js';
 import {createWindowsStaffSessionStore} from '../packages/database/dist/database/src/staff-session-store.js';
-import {verifyWindowsStaffConnection,windowsSessionRole,windowsStaffDatabase,windowsStaffTarget} from '../packages/database/dist/database/src/windows-staff-target.js';
+import {verifyWindowsStaffConnection,windowsSessionRole,windowsStaffTarget} from '../packages/database/dist/database/src/windows-staff-target.js';
 
 const unavailable=()=>new Error('Windows staff portal configuration unavailable');
 const LOCAL_STAFF_SESSION_SECONDS=600;
@@ -53,15 +53,16 @@ function readWindowsStorageSettings(env) {
        env.NUKHBAPAY_STAFF_SESSION_MODE!=='windows-staff-development' || env.NODE_TLS_REJECT_UNAUTHORIZED==='0' ||
        env.DB_STAFF_SESSION_ROLE!==windowsSessionRole)throw unavailable();
     const identity=parseIdentityRuntimeConfiguration(env);
-    const target=windowsStaffTarget(env.DB_STAFF_SESSION_EXPECTED_DATABASE_OID,env.DB_STAFF_SESSION_EXPECTED_SYSTEM_IDENTIFIER);
+    const target=windowsStaffTarget(env.DB_STAFF_SESSION_EXPECTED_DATABASE_OID,env.DB_STAFF_SESSION_EXPECTED_SYSTEM_IDENTIFIER,
+      env.NUKHBAPAY_WINDOWS_STAFF_CATALOGUE_SETUP_ID);
     const sessionUrl=new URL(env.DB_STAFF_SESSION_URL);
-    if(identity.host!=='127.0.0.1' || identity.port!==5432 || identity.database!==windowsStaffDatabase ||
+    if(identity.host!=='127.0.0.1' || identity.port!==5432 || identity.database!==target.database ||
        !['postgres:','postgresql:'].includes(sessionUrl.protocol) || sessionUrl.hostname!==identity.host ||
        (sessionUrl.port || '5432')!=='5432' || sessionUrl.username!==windowsSessionRole ||
-       sessionUrl.pathname!=='/'+windowsStaffDatabase || sessionUrl.search || sessionUrl.hash)throw unavailable();
+       sessionUrl.pathname!=='/'+target.database || sessionUrl.search || sessionUrl.hash)throw unavailable();
     const passwords=[identity.readerUrl,identity.writerUrl,sessionUrl.href].map(url=>decodeURIComponent(new URL(url).password));
     if(passwords.some(password=>password.length<16 || password.length>1024) || new Set(passwords).size!==3)throw unavailable();
-    const session=Object.freeze(Object.defineProperty({expectedDatabase:windowsStaffDatabase,expectedRole:windowsSessionRole},
+    const session=Object.freeze(Object.defineProperty({expectedDatabase:target.database,expectedRole:windowsSessionRole},
       'connectionString',{value:sessionUrl.href}));
     return Object.freeze({identity,session,target});
   } catch {throw unavailable();}
@@ -187,7 +188,8 @@ export async function startWindowsStaffPortal(env=process.env,{preflightOnly=fal
         if(stat.isFile()&&!stat.isSymbolicLink()&&stat.size<=1024) {
           const grant=JSON.parse(readFileSync(grantPath,'utf8'));
           const subjectDigest=createHash('sha256').update(issuer+'\n'+env.NUKHBAPAY_STAFF_ENROLLMENT_SUBJECT).digest('hex');
-          if(grant.version===1&&grant.tenantId===auth.tenantId&&grant.databaseOid===target.databaseOid&&
+          const grantOid=target.catalogueSetupId ? env.NUKHBAPAY_WINDOWS_STAFF_SOURCE_OID : target.databaseOid;
+          if(grant.version===1&&grant.tenantId===auth.tenantId&&/^[1-9]\d{0,9}$/.test(grantOid??'')&&grant.databaseOid===grantOid&&
              grant.systemIdentifier===target.systemIdentifier&&grant.subjectDigest===subjectDigest&&
              grant.staffId===membership.staff_id) {
             const {rows:[manager]}=await scope.query(`SELECT EXISTS(SELECT FROM nukhabapay.tenant_role_grants g
@@ -214,13 +216,16 @@ export async function startWindowsStaffPortal(env=process.env,{preflightOnly=fal
     const cataloguePassword=env.DB_LOCAL_CATALOGUE_READER_PASSWORD;
     if(setupId!==undefined || cataloguePassword!==undefined) {
       stage='dedicated catalogue reader connection';
-      catalogue=await createLocalCatalogueStorage({setupId,password:cataloguePassword},new Map([[auth.tenantId,[]]]));
+      if(target.catalogueSetupId&&setupId!==target.catalogueSetupId)throw unavailable();
+      catalogue=await createLocalCatalogueStorage({setupId,password:cataloguePassword,
+        databaseOid:target.catalogueSetupId?target.databaseOid:undefined},new Map([[auth.tenantId,[]]]));
       console.info('Dedicated local catalogue storage verified through its read-only role.');
       if(isolatedCataloguePreview)console.info('Local read-only Catalogue grant matched the active staff enrollment.');
     }
+    const discoveryProviders = catalogue ? configuredDiscoveryProviders(env) : [];
     const {staffAdministration,staffCatalogue}=createStaffAdministration({repository,auditWriter,now,readers:{
       staff:createStaffAdministrationReader(reader),...(catalogue && {catalogue:catalogue.read}),
-    },...(catalogue && {configuredDiscoveryProviders:configuredDiscoveryProviders(env)}),
+    },...(catalogue && {configuredDiscoveryProviders:discoveryProviders}),
       ...(catalogue && isolatedCataloguePreview && {isolatedCataloguePreview})});
     const staffWorkspace=new StaffWorkspaceService({repository,now,authority:createAdministrationAuthority(repository,now),
       store:createStaffWorkspaceStore(reader,writer)});
@@ -242,6 +247,7 @@ export async function startWindowsStaffPortal(env=process.env,{preflightOnly=fal
       sessions:integration.sessions,login:integration.login,staffManagement:staffAdministration,staffWorkspace,
       ...(staffCatalogue && {staffCatalogue,syncCatalogue:createManualCatalogueSync(auth.tenantId),
         refreshFxRates:createManualFxRefresh(auth.tenantId)}),
+      ...(staffCatalogue && discoveryProviders.includes('IPAY') && {syncIpayCatalogue:createManualIpaySync(auth.tenantId)}),
       ...(catalogue && {finxplorLayer1Prices:catalogue.readFinxplorLayer1Prices}),
       ...(staffCatalogue && isolatedCataloguePreview && {localCataloguePreview:true}),
       departmentAccess:staffWorkspace,windowsStaffStorageReady:ready});

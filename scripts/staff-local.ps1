@@ -36,11 +36,9 @@ function Confirm-PrivateProfilePath([string]$Path, [Security.Principal.SecurityI
   }
 }
 
-$inspection = Get-Content -LiteralPath (Join-Path $state 'windows-staff-inspection.json') -Raw | ConvertFrom-Json
-if ($inspection.targetVerified -ne $true -or $inspection.databaseOid -notmatch '^[1-9]\d{0,9}$' -or
-    $inspection.systemIdentifier -notmatch '^[1-9]\d{15,19}$') {
-  throw 'Refresh the Windows staff database inspection before starting the portal.'
-}
+. (Join-Path $PSScriptRoot 'windows-staff-database-target.ps1')
+$target = Read-WindowsStaffDatabaseTarget $project
+$inspection = $target.Inspection
 $tenants = @(Get-ChildItem -LiteralPath $state -Filter 'windows-enrollment-*.txt' -File |
   Where-Object { $_.BaseName -match '^windows-enrollment-[a-f0-9]{32}$' -and $_.Length -le 64 } |
   ForEach-Object { (Get-Content -Raw -LiteralPath $_.FullName).Trim() } |
@@ -101,7 +99,7 @@ try {
     }
     $password = Unlock-StaffSetting $credentials[$role]
     if (!$passwords.Add($password)) { throw 'The three PostgreSQL roles must have distinct passwords.' }
-    $settings[$name] = 'postgresql://' + $role + ':' + [Uri]::EscapeDataString($password) + '@127.0.0.1:5432/nukhbapay_staff'
+    $settings[$name] = 'postgresql://' + $role + ':' + [Uri]::EscapeDataString($password) + '@127.0.0.1:5432/' + $target.Database
     $password = $null
   }
   $passwords.Clear()
@@ -116,7 +114,8 @@ try {
     $catalogueProfile = Import-Clixml -LiteralPath $cataloguePath
     $catalogueCredential = $catalogueProfile.Credentials['nukhbapay_catalogue_reader']
     if ($catalogueProfile.Version -ne 1 -or $catalogueProfile.Cluster -cne $inspection.systemIdentifier -or
-        $catalogueProfile.Id -notmatch '^[a-f0-9]{32}$' -or $catalogueCredential -isnot [Security.SecureString]) {
+        $catalogueProfile.Id -notmatch '^[a-f0-9]{32}$' -or $catalogueCredential -isnot [Security.SecureString] -or
+        ($target.CatalogueSetupId -and $catalogueProfile.Id -cne $target.CatalogueSetupId)) {
       throw 'Catalogue reader settings do not match the verified Windows cluster.'
     }
     $settings['NUKHBAPAY_LOCAL_CATALOGUE_SETUP_ID'] = $catalogueProfile.Id

@@ -1,0 +1,54 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Staging ingress and outbound network for the app and one-shot restore tasks.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+
+Resources:
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+  InternetAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VpcId
+  IngressSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs '']
+      VpcId: !Ref VpcId
+      CidrBlock: 10.71.20.0/24
+  IngressSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [1, !GetAZs '']
+      VpcId: !Ref VpcId
+      CidrBlock: 10.71.21.0/24
+  IngressRoutes:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VpcId
+  InternetRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetAttachment
+    Properties:
+      RouteTableId: !Ref IngressRoutes
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  IngressAssociationA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref IngressSubnetA
+      RouteTableId: !Ref IngressRoutes
+  IngressAssociationB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref IngressSubnetB
+      RouteTableId: !Ref IngressRoutes
+
+Outputs:
+  IngressSubnetA:
+    Value: !Ref IngressSubnetA
+  IngressSubnetB:
+    Value: !Ref IngressSubnetB

@@ -1,0 +1,201 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: HTTPS staging staff and kiosk service for AI NukhbaPay.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  IngressSubnetA:
+    Type: AWS::EC2::Subnet::Id
+  IngressSubnetB:
+    Type: AWS::EC2::Subnet::Id
+  ApplicationSecurityGroup:
+    Type: AWS::EC2::SecurityGroup::Id
+  DatabaseHost:
+    Type: String
+  CertificateArn:
+    Type: String
+  RuntimeSecretArn:
+    Type: String
+    Description: Staging-only restricted staff database credentials.
+  CatalogueSecretArn:
+    Type: String
+    Description: Read-only staging catalogue database credentials.
+  Auth0SecretArn:
+    Type: String
+    Description: Existing Auth0 test application client secret for the staging portal.
+  StaffTenantId:
+    Type: String
+    AllowedPattern: '[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}'
+  ImageDigest:
+    Type: String
+    AllowedPattern: 'sha256:[a-f0-9]{64}'
+
+Resources:
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Public HTTPS for staging
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+  StaffIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ApplicationSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      Subnets: [!Ref IngressSubnetA, !Ref IngressSubnetB]
+      SecurityGroups: [!Ref LoadBalancerSecurityGroup]
+      LoadBalancerAttributes:
+        - Key: routing.http.preserve_host_header.enabled
+          Value: 'true'
+  StaffTargets:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      TargetType: ip
+      Protocol: HTTP
+      Port: 8080
+      HealthCheckPath: /health/ready
+      Matcher:
+        HttpCode: '200'
+  SecureListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: HTTPS
+      Port: 443
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: '404'
+  StagingHost:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref SecureListener
+      Priority: 10
+      Conditions:
+        - Field: host-header
+          Values: [staging.nukhbapay.com]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref StaffTargets
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StagingImageAndSecrets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action: [ecr:BatchGetImage, ecr:GetDownloadUrlForLayer, ecr:BatchCheckLayerAvailability]
+                Resource: !Sub 'arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/nukhbapay/staging-app'
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/nukhbapay/staging/staff:*'
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: [!Ref RuntimeSecretArn, !Ref CatalogueSecretArn, !Ref Auth0SecretArn]
+  StaffTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: nukhbapay-staging-staff
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: '512'
+      Memory: '1024'
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: staff
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.${AWS::URLSuffix}/nukhbapay/staging-app@${ImageDigest}'
+          PortMappings:
+            - ContainerPort: 8080
+              Protocol: tcp
+          Environment:
+            - Name: NUKHBAPAY_STAGING_RDS_HOST
+              Value: !Ref DatabaseHost
+            - Name: NUKHBAPAY_STAFF_AUTH0_ACCESS_TOKEN_AUDIENCE_MODE
+              Value: api-and-userinfo
+            - Name: NUKHBAPAY_STAFF_AUTH0_ISSUER
+              Value: https://dev-whz1tr4aj20nxswq.us.auth0.com/
+            - Name: NUKHBAPAY_STAFF_AUTH0_CLIENT_ID
+              Value: TBbIOZVfqVisv5S3xebFXSfBQfXsaEwu
+            - Name: NUKHBAPAY_STAFF_AUTH0_AUDIENCE
+              Value: https://api.dev.nukhbapay.com/staff
+            - Name: NUKHBAPAY_STAFF_AUTH0_STAFF_KIND_CLAIM
+              Value: https://claims.nukhbapay.com/principal
+            - Name: NUKHBAPAY_STAFF_AUTH0_TENANT_ID
+              Value: !Ref StaffTenantId
+          Secrets:
+            - Name: DB_IDENTITY_READER_URL
+              ValueFrom: !Sub '${RuntimeSecretArn}:DB_IDENTITY_READER_URL::'
+            - Name: DB_IDENTITY_WRITER_URL
+              ValueFrom: !Sub '${RuntimeSecretArn}:DB_IDENTITY_WRITER_URL::'
+            - Name: DB_STAFF_SESSION_URL
+              ValueFrom: !Sub '${RuntimeSecretArn}:DB_STAFF_SESSION_URL::'
+            - Name: DB_LOCAL_CATALOGUE_READER_PASSWORD
+              ValueFrom: !Sub '${CatalogueSecretArn}:DB_LOCAL_CATALOGUE_READER_PASSWORD::'
+            - Name: NUKHBAPAY_STAGING_CATALOGUE_ID
+              ValueFrom: !Sub '${CatalogueSecretArn}:NUKHBAPAY_STAGING_CATALOGUE_ID::'
+            - Name: NUKHBAPAY_STAFF_AUTH0_CLIENT_SECRET
+              ValueFrom: !Sub '${Auth0SecretArn}:NUKHBAPAY_STAFF_AUTH0_CLIENT_SECRET::'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /nukhbapay/staging/staff
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: staff
+  StaffService:
+    Type: AWS::ECS::Service
+    DependsOn: [StagingHost, StaffIngress]
+    Properties:
+      Cluster: nukhbapay-staging
+      ServiceName: staff
+      LaunchType: FARGATE
+      DesiredCount: 1
+      TaskDefinition: !Ref StaffTask
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      HealthCheckGracePeriodSeconds: 60
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups: [!Ref ApplicationSecurityGroup]
+          Subnets: [!Ref IngressSubnetA, !Ref IngressSubnetB]
+      LoadBalancers:
+        - ContainerName: staff
+          ContainerPort: 8080
+          TargetGroupArn: !Ref StaffTargets
+
+Outputs:
+  StagingLoadBalancer:
+    Value: !GetAtt LoadBalancer.DNSName
+  StaffExecutionRoleArn:
+    Value: !GetAtt ExecutionRole.Arn

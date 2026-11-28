@@ -1,0 +1,104 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: AI NukhbaPay private staging network and PostgreSQL database.
+
+Resources:
+  StagingVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.71.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: nukhbapay-staging
+        - Key: Environment
+          Value: staging
+
+  DatabaseSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref StagingVpc
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.71.10.0/24
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: nukhbapay-staging-db-a
+
+  DatabaseSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref StagingVpc
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: 10.71.11.0/24
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: nukhbapay-staging-db-b
+
+  ApplicationSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: NukhbaPay staging application workloads
+      VpcId: !Ref StagingVpc
+      Tags:
+        - Key: Name
+          Value: nukhbapay-staging-app
+
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: NukhbaPay staging PostgreSQL
+      VpcId: !Ref StagingVpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref ApplicationSecurityGroup
+      Tags:
+        - Key: Name
+          Value: nukhbapay-staging-db
+
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: NukhbaPay staging database subnets
+      SubnetIds:
+        - !Ref DatabaseSubnetA
+        - !Ref DatabaseSubnetB
+
+  StagingPostgres:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: nukhbapay-staging-postgres
+      Engine: postgres
+      EngineVersion: '18.7'
+      DBInstanceClass: db.t4g.micro
+      AllocatedStorage: '20'
+      StorageType: gp3
+      StorageEncrypted: true
+      MasterUsername: stagingadmin
+      ManageMasterUserPassword: true
+      PubliclyAccessible: false
+      MultiAZ: false
+      BackupRetentionPeriod: 1
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      VPCSecurityGroups:
+        - !Ref DatabaseSecurityGroup
+      Tags:
+        - Key: Application
+          Value: NukhbaPay
+        - Key: Environment
+          Value: staging
+
+Outputs:
+  VpcId:
+    Value: !Ref StagingVpc
+  ApplicationSecurityGroupId:
+    Value: !Ref ApplicationSecurityGroup
+  DatabaseEndpoint:
+    Value: !GetAtt StagingPostgres.Endpoint.Address
+  DatabasePort:
+    Value: !GetAtt StagingPostgres.Endpoint.Port

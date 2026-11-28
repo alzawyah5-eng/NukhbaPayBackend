@@ -48,9 +48,11 @@ export function createIdentityReaderPool(
   config: IdentityPoolSettings,
   identityConfig: Pick<IdentityDatabaseConfig, "readerUrl">,
   onConnect?: PoolConfig['onConnect'],
+  staging?: Pick<PoolConfig,'ssl'|'Client'|'enableChannelBinding'>,
 ): Pool {
   const pool = new Pool({
     ...(onConnect && {onConnect}),
+    ...staging,
     connectionString: identityConfig.readerUrl,
     application_name: "nukhbapay-identity-reader",
     max: config.poolMax,
@@ -71,9 +73,11 @@ export function createIdentityWriterPool(
   config: IdentityPoolSettings,
   identityConfig: Pick<IdentityDatabaseConfig, "writerUrl">,
   onConnect?: PoolConfig['onConnect'],
+  staging?: Pick<PoolConfig,'ssl'|'Client'|'enableChannelBinding'>,
 ): Pool {
   const pool = new Pool({
     ...(onConnect && {onConnect}),
+    ...staging,
     connectionString: identityConfig.writerUrl,
     application_name: "nukhbapay-identity-audit-writer",
     max: Math.min(config.poolMax, 2),

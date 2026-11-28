@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { Pool, type PoolClient } from "pg";
+import { Pool, type ClientBase, type PoolClient } from "pg";
 import { verifyWindowsStaffConnection, windowsSessionRole, windowsStaffDatabase, windowsStaffTarget, type WindowsStaffTarget } from './windows-staff-target.js';
+import { type AwsStagingTarget, verifyAwsStagingConnection } from './aws-staging-target.js';
 import { consumeStaffSessionHistoryTicket, consumeStaffSessionTicket, type StaffSessionStore, type StaffSessionHistoryTicket,
   type StaffSessionTicket, type SessionStoreOutcome, type SessionBinding } from "@nukhbapay/application";
 
@@ -21,10 +22,14 @@ export function createDisposableStaffSessionStore(input:StaffSessionStoreInput) 
 }
 
 export function createWindowsStaffSessionStore(input:StaffSessionStoreInput, target:WindowsStaffTarget) {
-  return openStaffSessionStore(input,windowsStaffTarget(target.databaseOid,target.systemIdentifier));
+  return openStaffSessionStore(input,windowsStaffTarget(target.databaseOid,target.systemIdentifier,target.catalogueSetupId));
 }
 
-async function openStaffSessionStore(input:StaffSessionStoreInput,mode:'GUARDED'|'DISPOSABLE_EFFECT'|WindowsStaffTarget):
+export function createAwsStagingStaffSessionStore(input:StaffSessionStoreInput, target:AwsStagingTarget) {
+  return openStaffSessionStore(input,target);
+}
+
+async function openStaffSessionStore(input:StaffSessionStoreInput,mode:'GUARDED'|'DISPOSABLE_EFFECT'|WindowsStaffTarget|AwsStagingTarget):
   Promise<StaffSessionStore & {close():Promise<void>;checkWindowsReadiness?:(issuer:string)=>Promise<boolean>}> {
   let pool:Pool|undefined;
   let readinessPool:Pool|undefined;
@@ -32,16 +37,22 @@ async function openStaffSessionStore(input:StaffSessionStoreInput,mode:'GUARDED'
   try {
     const url=new URL(input.connectionString),max=input.poolMax??2;
     const port=Number(url.port||5432);
-    const expected=typeof mode==='object' ? input.expectedRole===windowsSessionRole && input.expectedDatabase===windowsStaffDatabase && port===5432 :
+    const staging=typeof mode==='object' && 'host' in mode ? mode : undefined;
+    const verifyConnection=typeof mode==='object' ? (client:ClientBase) => 'host' in mode
+      ? verifyAwsStagingConnection(client,windowsStaffDatabase,windowsSessionRole)
+      : verifyWindowsStaffConnection(client,mode,windowsSessionRole) : undefined;
+    const expected=typeof mode==='object' ? input.expectedRole===windowsSessionRole &&
+      input.expectedDatabase===('database' in mode ? mode.database : windowsStaffDatabase) && port===5432 :
       mode==='GUARDED' ? /^nukh_session_[0-9a-f]{20}$/.test(input.expectedRole) &&
       /^nukhabapay_b3b[23]_[0-9a-f]{32}$/.test(input.expectedDatabase) && port===5432 :
       input.expectedRole==='nukh_effect_session' && /^nukhabapay_effect_[0-9a-f]{32}$/.test(input.expectedDatabase) &&
       Number.isInteger(port) && port>1024 && ![5432,55437].includes(port);
-    if(!expected || !["postgres:","postgresql:"].includes(url.protocol) || url.hostname!=="127.0.0.1" ||
+    if(!expected || !["postgres:","postgresql:"].includes(url.protocol) || url.hostname!==(staging?.host ?? '127.0.0.1') ||
       url.search || url.hash || !url.password || decodeURIComponent(url.username)!==input.expectedRole ||
       decodeURIComponent(url.pathname.slice(1))!==input.expectedDatabase || !Number.isInteger(max) || max<1 || max>3)throw unavailable();
     pool=new Pool({connectionString:input.connectionString,max,connectionTimeoutMillis:3000,idleTimeoutMillis:1000,
-      ...(typeof mode==='object' && {onConnect:(client)=>verifyWindowsStaffConnection(client,mode,windowsSessionRole)}),
+      ...(verifyConnection && {onConnect:verifyConnection}),
+      ...staging?.poolOptions,
       statement_timeout:5000,query_timeout:6000,application_name:"nukhbapay-staff-session-store"});
     pool.on("error",()=>undefined);
     // A discarded socket can report another error after query rejection/release.
@@ -50,11 +61,13 @@ async function openStaffSessionStore(input:StaffSessionStoreInput,mode:'GUARDED'
     const target=(await pool.query(`SELECT current_database() AS database,current_user AS role,host(inet_server_addr()) AS host,inet_server_port() AS port,
       current_setting('nukhbapay.effective_staff_fixture',true) AS fixture,
       (SELECT rolsuper OR rolcreatedb OR rolcreaterole OR rolinherit OR rolbypassrls OR NOT rolcanlogin FROM pg_roles WHERE rolname=current_user) AS unsafe,
-      EXISTS(SELECT 1 FROM pg_auth_members WHERE member=(SELECT oid FROM pg_roles WHERE rolname=current_user) OR roleid=(SELECT oid FROM pg_roles WHERE rolname=current_user)) AS memberships,
+      EXISTS(SELECT 1 FROM pg_auth_members m WHERE m.member=current_user::regrole OR (m.roleid=current_user::regrole AND NOT (
+        $1::boolean AND coalesce(m.member=to_regrole('stagingadmin'),false)
+        AND m.admin_option AND NOT m.set_option AND NOT m.inherit_option))) AS memberships,
       has_schema_privilege(current_user,'nukhabapay','USAGE,CREATE') OR has_schema_privilege(current_user,'nukhbapay_sessions','CREATE') OR
       has_database_privilege(current_user,current_database(),'CREATE,TEMP') AS excess,
-      NOT has_schema_privilege(current_user,'nukhbapay_sessions','USAGE') AS missing_scope`)).rows[0];
-    if(target.database!==input.expectedDatabase || target.role!==input.expectedRole || target.host!=="127.0.0.1" || target.port!==port ||
+      NOT has_schema_privilege(current_user,'nukhbapay_sessions','USAGE') AS missing_scope`,[Boolean(staging)])).rows[0];
+    if(target.database!==input.expectedDatabase || target.role!==input.expectedRole || !staging && target.host!=="127.0.0.1" || target.port!==port ||
       mode==='DISPOSABLE_EFFECT' && target.fixture!=='isolated' ||
       target.unsafe || target.memberships || target.excess || target.missing_scope)throw unavailable();
     const tables=(await pool.query(`SELECT relname,relrowsecurity,relforcerowsecurity,
@@ -79,6 +92,7 @@ async function openStaffSessionStore(input:StaffSessionStoreInput,mode:'GUARDED'
     // checks need their own connection to make progress when those slots are full.
     if(typeof mode==='object'){
       readinessPool=new Pool({connectionString:input.connectionString,max:1,connectionTimeoutMillis:3000,
+        ...staging?.poolOptions,
         statement_timeout:5000,query_timeout:6000,application_name:'nukhbapay-staff-session-readiness'});
       readinessPool.on('error',()=>undefined);
     }
@@ -171,11 +185,11 @@ async function openStaffSessionStore(input:StaffSessionStoreInput,mode:'GUARDED'
       } finally {client.release(discard||brokenClients.has(client));}
     }
     async function checkWindowsReadiness(issuer:string) {
-      if(closed || typeof mode!=='object' || !windowsReadinessPool)return false;
+      if(closed || !verifyConnection || !windowsReadinessPool)return false;
       let client:PoolClient|undefined, discard=false;
       try {
         client=await windowsReadinessPool.connect();
-        await verifyWindowsStaffConnection(client,mode,windowsSessionRole);
+        await verifyConnection(client);
         const result=await client.query(`SELECT count(*)=2 AND bool_and(relrowsecurity AND relforcerowsecurity
             AND pg_get_userbyid(relowner)='nukhabapay_migrator' AND NOT has_table_privilege(current_user,oid,'MAINTAIN'))
           AND EXISTS(SELECT FROM pg_catalog.pg_constraint k WHERE k.conrelid='nukhbapay_sessions.sessions'::regclass

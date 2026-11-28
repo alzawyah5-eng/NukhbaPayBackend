@@ -2,8 +2,9 @@ import type { Pool } from "pg";
 import { parseIdentityRuntimeConfiguration } from "./identity-runtime.config.js";
 import { createIdentityReaderPool, createIdentityWriterPool } from "./pool.js";
 import { SecurityAuditPostgresRepository, StaffIdentityPostgresRepository } from "./repositories/staff-identity-repository.js";
-import { verifyWindowsStaffConnection, windowsStaffDatabase, windowsStaffTarget, WindowsStaffTargetMismatch, type WindowsStaffTarget } from './windows-staff-target.js';
+import { verifyWindowsStaffConnection, windowsStaffTarget, WindowsStaffTargetMismatch, type WindowsStaffTarget } from './windows-staff-target.js';
 import type { IdentityRuntimeConfiguration } from './identity-runtime.config.js';
+import { type AwsStagingTarget, verifyAwsStagingConnection } from './aws-staging-target.js';
 
 export { parseIdentityRuntimeConfiguration } from "./identity-runtime.config.js";
 export type { IdentityRuntimeConfiguration, IdentityPoolSettings } from "./identity-runtime.config.js";
@@ -23,15 +24,17 @@ export class IdentityRuntimeUnavailableError extends Error {
   }
 }
 
-async function verifyLogin(pool: Pool, expectedRole: string): Promise<void> {
+async function verifyLogin(pool: Pool, expectedRole: string, staging = false): Promise<void> {
   const result = await pool.query(
     `SELECT current_user AS name, r.rolcanlogin, r.rolsuper, r.rolcreatedb, r.rolcreaterole,
             r.rolinherit, r.rolbypassrls,
-            EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid OR roleid = r.oid) AS member,
+            EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.member=r.oid OR (m.roleid=r.oid AND NOT (
+              $1::boolean AND coalesce(m.member=to_regrole('stagingadmin'),false)
+              AND m.admin_option AND NOT m.set_option AND NOT m.inherit_option))) AS member,
             has_schema_privilege(current_user, 'nukhabapay', 'CREATE') AS ddl,
             d.datdba = r.oid AS database_owner
      FROM pg_roles r JOIN pg_database d ON d.datname = current_database()
-     WHERE r.rolname = current_user`,
+     WHERE r.rolname = current_user`, [staging],
   );
   const row = result.rows[0] as Record<string, unknown> | undefined;
   if (result.rowCount !== 1 || row?.["name"] !== expectedRole || row["rolcanlogin"] !== true ||
@@ -46,25 +49,32 @@ export async function createIdentityRuntime(env: Readonly<Record<string, string 
 
 export async function createWindowsStaffIdentityRuntime(env: Readonly<Record<string,string|undefined>>, target: WindowsStaffTarget) {
   const config = parseIdentityRuntimeConfiguration(env);
-  if (config.host !== '127.0.0.1' || config.port !== 5432 || config.database !== windowsStaffDatabase) throw new IdentityRuntimeUnavailableError();
-  return openIdentityRuntime(config,windowsStaffTarget(target.databaseOid,target.systemIdentifier));
+  const verifiedTarget=windowsStaffTarget(target.databaseOid,target.systemIdentifier,target.catalogueSetupId);
+  if (config.host !== '127.0.0.1' || config.port !== 5432 || config.database !== verifiedTarget.database) throw new IdentityRuntimeUnavailableError();
+  return openIdentityRuntime(config,verifiedTarget);
 }
 
-async function openIdentityRuntime(config: IdentityRuntimeConfiguration, target?: WindowsStaffTarget) {
-  const reader = createIdentityReaderPool(config, config, target && (client => verifyWindowsStaffConnection(client,target,config.readerRole)));
-  const writer = createIdentityWriterPool(config, config, target && (client => verifyWindowsStaffConnection(client,target,config.writerRole)));
+export async function createAwsStagingIdentityRuntime(env:Readonly<Record<string,string|undefined>>, target:AwsStagingTarget) {
+  return openIdentityRuntime(parseIdentityRuntimeConfiguration(env,target.host), undefined, target);
+}
+
+async function openIdentityRuntime(config: IdentityRuntimeConfiguration, target?: WindowsStaffTarget, staging?:AwsStagingTarget) {
+  const reader = createIdentityReaderPool(config, config, staging ? client=>verifyAwsStagingConnection(client,config.database,config.readerRole) :
+    target && (client => verifyWindowsStaffConnection(client,target,config.readerRole)), staging?.poolOptions);
+  const writer = createIdentityWriterPool(config, config, staging ? client=>verifyAwsStagingConnection(client,config.database,config.writerRole) :
+    target && (client => verifyWindowsStaffConnection(client,target,config.writerRole)), staging?.poolOptions);
   let closing: Promise<void> | undefined;
   const close = (): Promise<void> => closing ??= Promise.all([reader.end(), writer.end()]).then(() => undefined);
   let loginRole: IdentityRuntimeConfiguration["readerRole" | "writerRole"] = config.readerRole;
   try {
-    await verifyLogin(reader, loginRole);
+    await verifyLogin(reader, loginRole, Boolean(staging));
     loginRole = config.writerRole;
-    await verifyLogin(writer, loginRole);
+    await verifyLogin(writer, loginRole, Boolean(staging));
     const checkReadiness = async (): Promise<boolean> => {
       if (closing !== undefined) return false;
       try {
-        await verifyLogin(reader, config.readerRole);
-        await verifyLogin(writer, config.writerRole);
+        await verifyLogin(reader, config.readerRole, Boolean(staging));
+        await verifyLogin(writer, config.writerRole, Boolean(staging));
         // Parse/permission checks only: never return or inspect staff records.
         await reader.query(`SELECT u.id,u.status,u.authz_version,u.tokens_valid_after,i.staff_id,i.issuer,i.subject,i.status,
           m.id,m.staff_id,m.tenant_id,m.status,m.version,p.staff_id,p.role_code,p.scope,p.granted_at,p.expires_at,p.revoked_at,

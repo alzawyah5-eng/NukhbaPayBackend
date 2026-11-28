@@ -7,6 +7,7 @@ import { attestVerifiedStaffIdentity } from "@nukhbapay/application/verified-ide
 import { normalizePublicationCommand, type PublicationCommand, type StaffSessionLifecycle, type TrustedStaffActorBoundary } from "@nukhbapay/application";
 
 export const TRANSACTION_COOKIE_NAME = "__Host-nukhbapay_oidc";
+export const AWS_STAGING_STAFF_ORIGIN = 'https://staging.nukhbapay.com';
 const opaque = /^[A-Za-z0-9_-]{43}$/;
 const fail = () => new Error("Staff authentication failed");
 const random = () => randomBytes(32).toString("base64url");
@@ -15,6 +16,7 @@ const text = (v: unknown, max = 512): v is string => typeof v === "string" && v.
 const date = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) >= 0;
 const AUTH0_DEPENDENCY_TIMEOUT_MS = 3000;
 const DEFAULT_ACCESS_TOKEN_LIFETIME_SECONDS = 300;
+const STAGING_TEST_TOKEN_LIFETIME_SECONDS = 600;
 const LOCAL_TOKEN_CLOCK_WAIT_MS = 2000;
 
 export type StaffCallbackFailureStage =
@@ -38,6 +40,7 @@ export interface Auth0Configuration {
   /** Exact operator-owned HTTPS claim name; the signed access-token value must be "human". */
   readonly staffKindClaim: string;
   readonly callbackUrl: string;
+  readonly deployment?: 'aws-staging';
   /** Selected by trusted server composition, never callback/query/claim data. */
   readonly tenantId: string | null;
 }
@@ -45,10 +48,13 @@ export interface Auth0Configuration {
 export function validateAuth0Configuration(input: Auth0Configuration): Readonly<Auth0Configuration> {
   try {
     const issuer = new URL(input.issuer), callback = new URL(input.callbackUrl), claim = new URL(input.staffKindClaim), audience = new URL(input.audience);
+    const allowedCallback = input.deployment === 'aws-staging'
+      ? callback.origin === AWS_STAGING_STAFF_ORIGIN && input.tenantId !== null && input.localSessionLifetimeSeconds === undefined
+      : input.deployment === undefined && callback.origin === `https://localhost:${callback.port}` && Boolean(callback.port);
     if (issuer.protocol !== "https:" || issuer.href !== input.issuer || issuer.pathname !== "/" || issuer.search || issuer.hash ||
         issuer.username || issuer.password || issuer.port || isIP(issuer.hostname) || !issuer.hostname.includes(".") ||
         /(?:^|\.)(?:localhost|local)$/.test(issuer.hostname) ||
-        callback.href !== input.callbackUrl || callback.origin !== `https://localhost:${callback.port}` || !callback.port ||
+        callback.href !== input.callbackUrl || !allowedCallback ||
         callback.pathname !== "/auth/callback" || callback.search || callback.hash || callback.username || callback.password ||
         !text(input.clientId, 128) || !text(input.clientSecret, 4096) || input.clientSecret.length < 32 ||
         !["https:", "urn:"].includes(audience.protocol) || audience.username || audience.password || audience.search || audience.hash ||
@@ -584,8 +590,9 @@ export class Auth0Login {
       mark("token-response");
       if (tokens['token_type'] !== "Bearer" || !date(tokens['expires_in']) || tokens['expires_in'] < 1 || 'refresh_token' in tokens) throw fail();
       mark("access-token-lifetime");
-      const lifetime = transaction.stepUp ? DEFAULT_ACCESS_TOKEN_LIFETIME_SECONDS :
+      const environmentLifetime=this.#config.deployment==='aws-staging' ? STAGING_TEST_TOKEN_LIFETIME_SECONDS :
         this.#config.localSessionLifetimeSeconds ?? DEFAULT_ACCESS_TOKEN_LIFETIME_SECONDS;
+      const lifetime = transaction.stepUp ? DEFAULT_ACCESS_TOKEN_LIFETIME_SECONDS : environmentLifetime;
       if (tokens['expires_in'] > lifetime) throw fail();
       const localLogin = !transaction.stepUp && this.#config.localSessionLifetimeSeconds === 600 ? transaction : undefined;
       const id = await this.#verify(tokens['id_token'], "id", new Date(this.#time()), mark, lifetime, localLogin);

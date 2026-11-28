@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
+import { storeIpayCatalogue } from '../import-ipay-catalogue.mjs';
 
 // This runs only inside the migration rehearsal transaction. The installer
 // rolls back the test records and all staged schema changes afterwards.
@@ -81,6 +82,27 @@ export async function rehearseLocalCatalogueSchema(client) {
   await scope(otherTenant);
   assert.equal((await client.query('SELECT 1 FROM nukhabapay.catalogue_discovery_scan_items WHERE scan_id=$1', [scan])).rowCount, 0);
   assert.equal((await client.query('SELECT 1 FROM nukhabapay.current_catalogue_discoveries WHERE id=$1', [discovery])).rowCount, 0);
+  await scope(tenant);
+  const ipayAccount = { tenantId: tenant, providerAccountId: randomUUID() };
+  await client.query(`INSERT INTO nukhabapay.provider_accounts(id,tenant_id,provider_code,external_account_key,status)
+    VALUES($1,$2,'IPAY',$3,'DISABLED')`, [ipayAccount.providerAccountId, tenant, 'fixture-terminal-' + tenant]);
+  const ipayFile = { version:'0030009', groupNumber:'003', products:[{
+    code:'TST001',title:'Fixture PIN',category:'Fixture category',sourceType:'EP',amountLimit:'0',currency:'AED',
+    amounts:[{value:'50.00'},{value:'25.0100'}],
+  }] };
+  await client.query('SET CONSTRAINTS nukhabapay.local_discovery_coverage_at_commit DEFERRED');
+  const saveIpay = file => storeIpayCatalogue(client, ipayAccount, file, 'ARE', stamp);
+  assert.deepEqual(await saveIpay(ipayFile), { products:1, inserted:1, unchanged:0, sourceVersion:'0030009' });
+  await client.query('SET CONSTRAINTS nukhabapay.local_discovery_coverage_at_commit IMMEDIATE');
+  assert.deepEqual(await saveIpay(ipayFile), { products:1, inserted:0, unchanged:1, sourceVersion:'0030009' });
+  await assert.rejects(() => saveIpay({ ...ipayFile, version:'0030008' }), /current version scope/);
+  const { rows: ipayRows } = await client.query(`SELECT denominations, min_amount, max_amount
+    FROM nukhabapay.observed_catalogue_discoveries WHERE provider_account_id=$1 AND coverage_scope='IPAY_PRODUCT_FILE'`,
+  [ipayAccount.providerAccountId]);
+  assert.deepEqual(ipayRows, [{denominations:['25.0100','50.00'],min_amount:'25.0100',max_amount:'50.00'}]);
+  await scope(otherTenant);
+  assert.equal((await client.query('SELECT 1 FROM nukhabapay.observed_catalogue_discoveries WHERE provider_account_id=$1',
+    [ipayAccount.providerAccountId])).rowCount, 0);
   await scope(tenant);
   await client.query(`INSERT INTO nukhabapay.provider_snapshots(id,tenant_id,provider_account_id,snapshot_key,source_version,
     observed_at,status,row_count,completed_at) VALUES($1,$2,$3,'qualification','v1',$4,'COMPLETE',0,$5)`, [snapshot, tenant, account, started, stamp]);

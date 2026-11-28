@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createIpaySoapProcess, IpaySdk } from '../src/ipay-sdk.ts';
-import { encodeIpayXmlText } from '../src/ipay-soap.ts';
+import { decodeIpayProductFile, encodeIpayXmlText } from '../src/ipay-soap.ts';
 
 const account = { tenantId: '00000000-0000-4000-8000-000000000001', providerAccountId: '00000000-0000-4000-8000-000000000002' };
 const soap = 'http://schemas.xmlsoap.org/soap/envelope/';
@@ -107,4 +107,30 @@ test('iPay PIN checks use the configured case and require the documented positiv
   assert.deepEqual(await sdk.execute(account,request), { outcome:'OBSERVED', available:true });
   assert.deepEqual(await sdk.execute(account,request), { outcome:'UNCONFIRMED' });
   assert.deepEqual(await sdk.execute(account,request), { outcome:'UNCONFIRMED' });
+});
+
+test('iPay projects the qualified Qore3 file format with exact denominations and no price inferred from Display', () => {
+  const document = '<![CDATA[<?xml version="1.0"?>' +
+    '<ProductFile><GroupNumber>003</GroupNumber><ProductVersion>0009</ProductVersion><NumberOfCategories>1</NumberOfCategories>' +
+    '<Category Name="Fixture catalogue" Products="2">' +
+    '<Product ProductCode="TST001" Name="Fixture PIN" StoreGUI="EP" CurrencyCode="AED" Amounts="1">' +
+    '<Amount Value="25.0100" Display="AED 30"/></Product>' +
+    '<Product ProductCode="TST002" Name="Fixture top-up" StoreGUI="TT" CurrencyCode="AED" Amounts="1">' +
+    '<Amount Value="0" Display="AED .00"/></Product></Category></ProductFile>]]>';
+  const profile = {rootElement:'ProductFile',groupNumber:'003',format:'qore3-product-file'} as const;
+  assert.deepEqual(decodeIpayProductFile(document,profile,'0030009'),{
+    version:'0030009',groupNumber:'003',products:[
+      {code:'TST001',title:'Fixture PIN',category:'Fixture catalogue',sourceType:'EP',currency:'AED',amountLimit:'0',amounts:[{value:'25.0100'}]},
+      {code:'TST002',title:'Fixture top-up',category:'Fixture catalogue',sourceType:'TT',currency:'AED',amountLimit:'0',amounts:[]},
+    ],
+  });
+  assert.throws(() => decodeIpayProductFile(document,profile,'0030010'));
+  for (const invalid of [
+    document.replace('003</GroupNumber>','004</GroupNumber>'),
+    document.replace('<GroupNumber>003</GroupNumber>','<GroupNumber>003</GroupNumber><GroupNumber>003</GroupNumber>'),
+    document.replace('<NumberOfCategories>1','<NumberOfCategories>2'),
+    document.replace('CurrencyCode="AED"','CurrencyCode="AEDX"'),
+    document.replace('StoreGUI="TT"','StoreGUI="EP"'),
+    document.replace('<ProductFile>','<!DOCTYPE ProductFile><ProductFile>'),
+  ]) assert.throws(() => decodeIpayProductFile(invalid,profile,'0030009'));
 });

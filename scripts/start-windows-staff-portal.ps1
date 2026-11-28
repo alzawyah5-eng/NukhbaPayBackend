@@ -11,9 +11,9 @@ function Read-PortalSetting([string]$Name) {
   return [Environment]::GetEnvironmentVariable($Name)
 }
 $project=(Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
-$evidence=Get-Content -Raw -LiteralPath (Join-Path $project '.local\windows-staff-inspection.json') | ConvertFrom-Json
-if($evidence.targetVerified -ne $true -or $evidence.databaseOid -notmatch '^[1-9]\d{0,9}$' -or
-   $evidence.systemIdentifier -notmatch '^[1-9]\d{15,19}$'){throw 'Run the Windows staff database inspection first.'}
+. (Join-Path $PSScriptRoot 'windows-staff-database-target.ps1')
+$target = Read-WindowsStaffDatabaseTarget $project
+$evidence = $target.Inspection
 $missing=@(@('readerExists','writerExists','sessionRoleExists','iamInstalled','sessionsInstalled','workspaceInstalled') |
   Where-Object {$evidence.$_ -ne $true})
 if($missing.Count){throw ('Windows staff database prerequisites missing in the last inspection: '+($missing -join ', ')+'. Refresh the inspection after provisioning.')}
@@ -48,9 +48,13 @@ $values['NUKHBAPAY_ENVIRONMENT']='development'
 $values['NUKHBAPAY_STAFF_SESSION_MODE']='windows-staff-development'
 $values['DB_IDENTITY_CONNECTION_TIMEOUT_MS']='10000'
 $values['NUKHBAPAY_STAFF_AUTH0_ACCESS_TOKEN_AUDIENCE_MODE']='api-and-userinfo'
-$values['DB_STAFF_SESSION_EXPECTED_DATABASE_OID']=$evidence.databaseOid
+$values['DB_STAFF_SESSION_EXPECTED_DATABASE_OID']=$target.Oid
 $values['DB_STAFF_SESSION_EXPECTED_SYSTEM_IDENTIFIER']=$evidence.systemIdentifier
 $values['DB_STAFF_SESSION_ROLE']='nukhabapay_session_backend'
+if($target.CatalogueSetupId){
+  $values['NUKHBAPAY_WINDOWS_STAFF_CATALOGUE_SETUP_ID']=$target.CatalogueSetupId
+  $values['NUKHBAPAY_WINDOWS_STAFF_SOURCE_OID']=$evidence.databaseOid
+}
 try {
   if(!$StorageOnly -and $null -ne $Settings) {
     foreach($key in 'NUKHBAPAY_LOCAL_CATALOGUE_SETUP_ID','DB_LOCAL_CATALOGUE_READER_PASSWORD') {
@@ -81,7 +85,7 @@ try {
     if($configured){$values[$binding[0]]=$configured}
     if(!$values[$binding[0]]){
       $password=Unprotect-LocalValue (Read-Host ('Database password for '+$binding[1]) -AsSecureString)
-      $values[$binding[0]]='postgresql://'+$binding[1]+':'+[Uri]::EscapeDataString($password)+'@127.0.0.1:5432/nukhbapay_staff'
+      $values[$binding[0]]='postgresql://'+$binding[1]+':'+[Uri]::EscapeDataString($password)+'@127.0.0.1:5432/'+$target.Database
       $password=$null
     }
   }

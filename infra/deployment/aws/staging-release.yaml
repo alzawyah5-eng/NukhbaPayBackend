@@ -1,0 +1,356 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Build and deploy AI NukhbaPay staging from frontend and backend GitHub pushes.
+
+Parameters:
+  StaffExecutionRoleArn:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^arn:aws:iam::[0-9]{12}:role/nukhbapay-staging-service-ExecutionRole-[A-Za-z0-9]+$'
+    Description: Existing staging staff task execution role. An empty value enables builds only.
+
+Conditions:
+  DeployStaff: !Not [!Equals [!Ref StaffExecutionRoleArn, '']]
+
+Resources:
+  ReleaseBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'nukhbapay-staging-release-${AWS::AccountId}-${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpirePreviousVersions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 7
+          - Id: ExpirePipelineArtifacts
+            Status: Enabled
+            Prefix: nukhbapay-staging-release/
+            ExpirationInDays: 7
+
+  GitHub:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+
+  BackendPush:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: nukhbapay-staging-backend-push
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref GitHub
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: repo:alzawyah5-eng/NukhbaPayBackend:ref:refs/heads/staging
+      Policies:
+        - PolicyName: UploadBackendSource
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub '${ReleaseBucket.Arn}/sources/backend.zip'
+
+  FrontendPush:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: nukhbapay-staging-frontend-push
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref GitHub
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: repo:alzawyah5-eng/NukhbaPayFrontend:ref:refs/heads/staging
+      Policies:
+        - PolicyName: UploadFrontendSource
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub '${ReleaseBucket.Arn}/sources/frontend.zip'
+
+  BuildLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /nukhbapay/staging/release-build
+      RetentionInDays: 7
+
+  BuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:codebuild:${AWS::Region}:${AWS::AccountId}:project/nukhbapay-staging-release'
+      Policies:
+        - PolicyName: BuildStagingRelease
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetBucketLocation, s3:GetBucketAcl]
+                Resource: !GetAtt ReleaseBucket.Arn
+              - Effect: Allow
+                Action: [s3:GetObject, s3:GetObjectVersion, s3:PutObject]
+                Resource: !Sub '${ReleaseBucket.Arn}/nukhbapay-staging-release/*'
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:PutImage
+                  - ecr:DescribeImages
+                Resource: !Sub 'arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/nukhbapay/staging-app'
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !GetAtt BuildLogs.Arn
+
+  Project:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: nukhbapay-staging-release
+      ServiceRole: !GetAtt BuildRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: ECR_REGISTRY
+            Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.${AWS::URLSuffix}'
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Ref BuildLogs
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.2
+          env:
+            shell: bash
+          phases:
+            pre_build:
+              commands:
+                - set -euo pipefail
+                - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+            build:
+              commands:
+                - |
+                  set -euo pipefail
+                  context=$(mktemp -d)
+                  mkdir "$context/backend" "$context/frontend"
+                  cp -a "$CODEBUILD_SRC_DIR/." "$context/backend/"
+                  cp -a "$CODEBUILD_SRC_DIR_Frontend/." "$context/frontend/"
+                  cp "$context/backend/.dockerignore" "$context/.dockerignore"
+                  tag="staging-pipeline-$CODEBUILD_BUILD_NUMBER"
+                  image="$ECR_REGISTRY/nukhbapay/staging-app:$tag"
+                  docker build --file "$context/backend/infra/deployment/aws/Dockerfile" --tag "$image" "$context"
+                  docker push "$image"
+                  digest=$(aws ecr describe-images --repository-name nukhbapay/staging-app --image-ids "imageTag=$tag" --query 'imageDetails[0].imageDigest' --output text)
+                  [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+                  printf '[{"name":"staff","imageUri":"%s/nukhbapay/staging-app@%s"}]\n' "$ECR_REGISTRY" "$digest" > imagedefinitions.json
+          artifacts:
+            files: [imagedefinitions.json]
+      TimeoutInMinutes: 25
+
+  PipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StagingPipeline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetBucketLocation, s3:GetBucketVersioning, s3:GetBucketAcl]
+                Resource: !GetAtt ReleaseBucket.Arn
+              - Effect: Allow
+                Action: [s3:GetObject, s3:GetObjectVersion, s3:GetObjectTagging, s3:GetObjectVersionTagging]
+                Resource:
+                  - !Sub '${ReleaseBucket.Arn}/sources/backend.zip'
+                  - !Sub '${ReleaseBucket.Arn}/sources/frontend.zip'
+              - Effect: Allow
+                Action: [s3:GetObject, s3:GetObjectVersion, s3:PutObject, s3:PutObjectTagging]
+                Resource: !Sub '${ReleaseBucket.Arn}/nukhbapay-staging-release/*'
+              - Effect: Allow
+                Action: [codebuild:StartBuild, codebuild:BatchGetBuilds]
+                Resource: !GetAtt Project.Arn
+        - !If
+          - DeployStaff
+          - PolicyName: DeployStagingStaff
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action: [ecs:DescribeTaskDefinition, ecs:RegisterTaskDefinition]
+                  Resource: '*'
+                - Effect: Allow
+                  Action: [ecs:DescribeServices, ecs:UpdateService]
+                  Resource: !Sub 'arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:service/nukhbapay-staging/staff'
+                - Effect: Allow
+                  Action: ecs:TagResource
+                  Resource: !Sub 'arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/nukhbapay-staging-staff:*'
+                  Condition:
+                    StringEquals:
+                      ecs:CreateAction: RegisterTaskDefinition
+                - Effect: Allow
+                  Action: iam:PassRole
+                  Resource: !Ref StaffExecutionRoleArn
+                  Condition:
+                    StringEquals:
+                      iam:PassedToService: ecs-tasks.amazonaws.com
+          - !Ref AWS::NoValue
+
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: nukhbapay-staging-release
+      PipelineType: V1
+      RoleArn: !GetAtt PipelineRole.Arn
+      RestartExecutionOnUpdate: true
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ReleaseBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: BackendSource
+              ActionTypeId: {Category: Source, Owner: AWS, Provider: S3, Version: '1'}
+              Configuration:
+                S3Bucket: !Ref ReleaseBucket
+                S3ObjectKey: sources/backend.zip
+                PollForSourceChanges: 'false'
+              OutputArtifacts:
+                - Name: Backend
+            - Name: FrontendSource
+              ActionTypeId: {Category: Source, Owner: AWS, Provider: S3, Version: '1'}
+              Configuration:
+                S3Bucket: !Ref ReleaseBucket
+                S3ObjectKey: sources/frontend.zip
+                PollForSourceChanges: 'false'
+              OutputArtifacts:
+                - Name: Frontend
+        - Name: Build
+          Actions:
+            - Name: BuildStagingImage
+              ActionTypeId: {Category: Build, Owner: AWS, Provider: CodeBuild, Version: '1'}
+              Configuration:
+                ProjectName: !Ref Project
+                PrimarySource: Backend
+              InputArtifacts:
+                - Name: Backend
+                - Name: Frontend
+              OutputArtifacts:
+                - Name: StaffImage
+        - !If
+          - DeployStaff
+          - Name: Deploy
+            Actions:
+              - Name: UpdateStagingStaff
+                ActionTypeId: {Category: Deploy, Owner: AWS, Provider: ECS, Version: '1'}
+                Configuration:
+                  ClusterName: nukhbapay-staging
+                  ServiceName: staff
+                  FileName: imagedefinitions.json
+                InputArtifacts:
+                  - Name: StaffImage
+          - !Ref AWS::NoValue
+
+  SourceEventRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/nukhbapay-staging-release-source'
+      Policies:
+        - PolicyName: StartStagingPipeline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: codepipeline:StartPipelineExecution
+                Resource: !Sub 'arn:${AWS::Partition}:codepipeline:${AWS::Region}:${AWS::AccountId}:${Pipeline}'
+
+  SourceEvents:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: nukhbapay-staging-release-source
+      State: ENABLED
+      EventPattern:
+        source: [aws.s3]
+        detail-type: [Object Created]
+        detail:
+          bucket:
+            name: [!Ref ReleaseBucket]
+          object:
+            key: [sources/backend.zip, sources/frontend.zip]
+      Targets:
+        - Id: StagingPipeline
+          Arn: !Sub 'arn:${AWS::Partition}:codepipeline:${AWS::Region}:${AWS::AccountId}:${Pipeline}'
+          RoleArn: !GetAtt SourceEventRole.Arn
+
+Outputs:
+  ReleaseBucket:
+    Value: !Ref ReleaseBucket
+  BackendPushRoleArn:
+    Value: !GetAtt BackendPush.Arn
+  FrontendPushRoleArn:
+    Value: !GetAtt FrontendPush.Arn
+  PipelineName:
+    Value: !Ref Pipeline

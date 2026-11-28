@@ -37,6 +37,7 @@ test('existing React workspace completes catalogue loading and protected command
   const fixtureRequests=new Set();
   let command='STEP_UP_REQUIRED',reviewDecision,expired=false,privatePrice='permitted',publicationAction;
   let loginEnabled=false,staffEnabled=true,configuredCatalogue=false;
+  let ipaySynced=false;
   let discoveryPaginationExpired=false;
   let fxRuns=0, convertedFixturePrice='16.24135802116804';
   const server=createServer((req,res)=>{
@@ -44,7 +45,7 @@ test('existing React workspace completes catalogue loading and protected command
     fixtureRequests.add(url.pathname);
     const reply=(status,body)=>{res.writeHead(status,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify(body));};
     if (url.pathname==='/auth/workspace') {reply(expired?401:200,{csrfToken:key,staffId:actor,tenantId:tenant,expiresAtMs:Date.now()+60000,
-      ...(staffEnabled && {canRefreshFxRates:true}),
+      ...(staffEnabled && {canRefreshFxRates:true,canSyncIpayCatalogue:true}),
       navigation:staffEnabled?['/overview','/staff','/audit','/catalogue','/staff/commands','/catalogue/publication']:['/overview']});return;}
     if (url.pathname==='/auth/config') {reply(200,{loginPath:loginEnabled?'/auth/login':null});return;}
     if (url.pathname==='/auth/login') {reply(200,{surface:'fixture login handoff'});return;}
@@ -56,6 +57,12 @@ test('existing React workspace completes catalogue loading and protected command
     }
     if (url.pathname.startsWith('/staff-api/catalogue/')) {
       const view=url.pathname.split('/').pop();
+      if(view==='sync-ipay' && req.method==='POST') {
+        assert.equal(req.headers['x-csrf-token'],key);
+        ipaySynced=true;
+        reply(200,{products:1,inserted:1,unchanged:0,persisted:true});
+        return;
+      }
       if (view==='refresh-rates' && req.method==='POST') {
         assert.equal(req.headers['x-csrf-token'],key);
         if (++fxRuns===1) reply(200,{status:'not-configured'});
@@ -74,11 +81,17 @@ test('existing React workspace completes catalogue loading and protected command
         page([{id:'FINXPLOR',name:'Finxplor',hasDiscoveries:true,functions:[
           {name:'List products',method:'GET',path:'/api/v1/products',verification:'Sandbox imported'},
           {name:'Get product details',method:'GET',path:'/api/v1/products/:productId',verification:'Mock verified'},
-        ]},{id:'IPAY',name:'iPay / Qore3',hasDiscoveries:false}],null,null,2,
+        ]},{id:'IPAY',name:'iPay / Qore3',hasDiscoveries:ipaySynced}],null,null,2,
         {hasConfiguredServices:configuredCatalogue,pricingPreviewAvailable:false,normalizationStatus:'AED_NORMALIZATION_UNAVAILABLE'});return;
       }
       if (view==='discoveries') {
         assert.ok(url.searchParams.has('provider'));
+        if(ipaySynced && url.searchParams.get('provider')==='IPAY') {
+          page([{id:'ipay-fixture',name:'Fixture iPay PIN',providerId:'IPAY',brand:'Du',currency:'AED',
+            sourceId:'TST001',sourceCountry:'ARE',minAmount:'25.0100',maxAmount:'50',denominations:['25.0100','50'],
+            reviewReason:'OUTSIDE_PRICED_CATALOGUE_SCOPE',coverageScope:'IPAY_PRODUCT_FILE'}]);
+          return;
+        }
         if(url.searchParams.get('provider')!=='FINXPLOR'){page([],null,null,0,{sourceMarkets:[],productTypes:[]});return;}
         const extra={catalogueCoverage:'PARTIAL',sourceMarkets:[{id:'GTM',name:'Guatemala',region:'Americas'},
           {id:'ARE',name:'United Arab Emirates',region:'GCC'}],productTypes:['Gift cards','Mobile recharge']};
@@ -303,6 +316,10 @@ test('existing React workspace completes catalogue loading and protected command
     await fill('provider-discovery-search','no-fixture');await click('Find provider products');
     await visible('No provider products match your filters.');
     await select('Provider','IPAY');await visible('No products have been imported for this provider.');
+    await click('Sync iPay products');
+    await visible('Saved 1 products to PostgreSQL');
+    await visible('Fixture iPay PIN');
+    await visible('25.0100, 50 AED');
     await select('Provider','FINXPLOR');await visible('Sandbox discovery fixture');
     configuredCatalogue=true;
     await go('/catalogue');

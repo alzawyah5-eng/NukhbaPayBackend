@@ -41,7 +41,8 @@ test('the connection check requires a positive server result for the pinned role
   let calls=0;
   const positive={query:async(sql,params)=>{
     calls++;
-    assert.deepEqual(params,['nukhbapay_staff','12345','7000000000000000001',reader]);
+    assert.deepEqual(params,['nukhbapay_staff','12345','7000000000000000001',reader,
+      'nukhabapay_migrator','NukhbaPay Windows staff development v1']);
     return {rows:[{verified:true}]};
   }};
   await verifyWindowsStaffConnection(positive,target,reader);
@@ -52,6 +53,24 @@ test('the connection check requires a positive server result for the pinned role
   await assert.rejects(verifyWindowsStaffConnection({query:async()=>({
     rows: [{verified: false, failed_checks: ['schema grants', 'private detail']}],
   })},target,reader), {failedChecks: ['schema grants']});
+});
+
+test('the consolidated portal requires all three role URLs and the catalogue marker to match',async()=>{
+  const setupId='a'.repeat(32);
+  const targetConfig={...config,NUKHBAPAY_WINDOWS_STAFF_CATALOGUE_SETUP_ID:setupId};
+  assert.throws(()=>readWindowsStaffSettings(targetConfig));
+  const unified={...targetConfig,DB_IDENTITY_READER_URL:uri(reader).replace('/nukhbapay_staff','/nukhbapay_catalogue'),
+    DB_IDENTITY_WRITER_URL:uri(writer).replace('/nukhbapay_staff','/nukhbapay_catalogue'),
+    DB_STAFF_SESSION_URL:uri(session).replace('/nukhbapay_staff','/nukhbapay_catalogue')};
+  const parsed=readWindowsStaffSettings(unified);
+  assert.equal(parsed.session.expectedDatabase,'nukhbapay_catalogue');
+  assert.throws(()=>readWindowsStaffSettings({...unified,NUKHBAPAY_WINDOWS_STAFF_CATALOGUE_SETUP_ID:'invalid'}));
+  assert.throws(()=>readWindowsStaffSettings({...unified,DB_STAFF_SESSION_URL:uri(session)}));
+  await verifyWindowsStaffConnection({query:async(sql,params)=>{
+    assert.deepEqual(params,['nukhbapay_catalogue','12345','7000000000000000001',reader,
+      'nukhbapay_catalogue_migrator','nukhbapay-catalogue-local:'+setupId]);
+    return {rows:[{verified:true}]};
+  }},parsed.target,reader);
 });
 
 test('portal reports the affected IAM role and a safe failure category', async t => {

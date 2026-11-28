@@ -87,7 +87,7 @@ async function useClient(user, password, name, work) {
   finally { await client.end().catch(() => undefined); }
 }
 
-function scram(password) {
+export function scram(password) {
   const salt = randomBytes(16);
   const salted = pbkdf2Sync(password, salt, 4096, 32, 'sha256');
   const client = createHmac('sha256', salted).update('Client Key').digest();
@@ -169,7 +169,7 @@ async function provision(admin, passwords, marker, expectedSystem, checkpoint) {
   } catch (error) { await admin.query('ROLLBACK'); throw error; }
 }
 
-export async function installLocalCatalogueMigrations(client, migrations, { initialise = false, check = false, rehearse } = {}) {
+export async function installLocalCatalogueMigrations(client, migrations, { initialise = false, check = false, rehearse, afterMigration } = {}) {
   await client.query(check ? 'BEGIN READ ONLY' : 'BEGIN');
   try {
     await client.query('SELECT pg_advisory_xact_lock(8074652183940113::bigint)');
@@ -191,6 +191,7 @@ export async function installLocalCatalogueMigrations(client, migrations, { init
     reject(check && pending.length > 0, 'Pending catalogue migrations need the normal startup command.');
     for (const { name, digest, statements } of pending) {
       for (const statement of statements) await client.query(statement);
+      if (afterMigration) await afterMigration(client, name);
       await client.query('INSERT INTO nukhabapay.local_catalogue_schema_history(name,source_sha256) VALUES($1,$2)', [name, digest]);
     }
     if (rehearse) {

@@ -1,0 +1,168 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: One-shot private RDS catalogue restore for AI NukhbaPay staging.
+
+Parameters:
+  SnapshotBucket:
+    Type: String
+    AllowedPattern: 'nukhbapay-staging-build-[a-z0-9-]+'
+  SnapshotKey:
+    Type: String
+    AllowedPattern: 'restore/catalogue-[a-f0-9]{32}\.json\.gz'
+  SnapshotChecksum:
+    Type: String
+    AllowedPattern: '[A-Za-z0-9+/]{43}='
+  CatalogueId:
+    Type: String
+    AllowedPattern: '[a-f0-9]{32}'
+  DatabaseHost:
+    Type: String
+    AllowedPattern: 'nukhbapay-staging-postgres\.[a-z0-9]+\.eu-north-1\.rds\.amazonaws\.com'
+  MasterSecretArn:
+    Type: String
+  ImageDigest:
+    Type: String
+    AllowedPattern: 'sha256:[a-f0-9]{64}'
+
+Resources:
+  CatalogueReader:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: nukhbapay/staging/catalogue/reader
+      Description: Read-only PostgreSQL credentials for the staging catalogue.
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"NUKHBAPAY_STAGING_CATALOGUE_ID":"${CatalogueId}"}'
+        GenerateStringKey: DB_LOCAL_CATALOGUE_READER_PASSWORD
+        PasswordLength: 64
+        ExcludeUppercase: true
+        ExcludePunctuation: true
+        ExcludeCharacters: ghijklmnopqrstuvwxyz
+  RestoreLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /nukhbapay/staging/restore
+      RetentionInDays: 7
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*'
+      Policies:
+        - PolicyName: StagingRestoreExecution
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action: [ecr:BatchGetImage, ecr:GetDownloadUrlForLayer, ecr:BatchCheckLayerAvailability]
+                Resource: !Sub 'arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/nukhbapay/staging-app'
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !GetAtt RestoreLogs.Arn
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: [!Ref MasterSecretArn, !Ref CatalogueReader]
+  SnapshotRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*'
+      Policies:
+        - PolicyName: ReadApprovedCatalogueSnapshot
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${SnapshotBucket}/${SnapshotKey}'
+  RestoreTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: nukhbapay-staging-catalogue-restore
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: '512'
+      Memory: '1024'
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt SnapshotRole.Arn
+      Volumes:
+        - Name: snapshot
+      ContainerDefinitions:
+        - Name: fetch-snapshot
+          Image: public.ecr.aws/aws-cli/aws-cli:2.27.41
+          Essential: false
+          Command: [s3api, get-object, --bucket, !Ref SnapshotBucket, --key, !Ref SnapshotKey, --checksum-mode, ENABLED, /restore/catalogue.json.gz, --query, ChecksumSHA256, --output, text, --no-cli-pager]
+          MountPoints:
+            - SourceVolume: snapshot
+              ContainerPath: /restore
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref RestoreLogs
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: restore
+        - Name: import-catalogue
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.${AWS::URLSuffix}/nukhbapay/staging-app@${ImageDigest}'
+          # The AWS CLI writes its download with owner-only permissions in the shared volume.
+          User: '0:0'
+          ReadonlyRootFilesystem: true
+          LinuxParameters:
+            Capabilities:
+              Drop: [ALL]
+          DependsOn:
+            - ContainerName: fetch-snapshot
+              Condition: SUCCESS
+          Command: [node, scripts/restore-aws-staging-catalogue.mjs]
+          Environment:
+            - Name: NUKHBAPAY_STAGING_RDS_HOST
+              Value: !Ref DatabaseHost
+            - Name: STAGING_SNAPSHOT_CHECKSUM
+              Value: !Ref SnapshotChecksum
+          Secrets:
+            - Name: STAGING_DB_USERNAME
+              ValueFrom: !Sub '${MasterSecretArn}:username::'
+            - Name: STAGING_DB_PASSWORD
+              ValueFrom: !Sub '${MasterSecretArn}:password::'
+            - Name: DB_LOCAL_CATALOGUE_READER_PASSWORD
+              ValueFrom: !Sub '${CatalogueReader}:DB_LOCAL_CATALOGUE_READER_PASSWORD::'
+            - Name: NUKHBAPAY_STAGING_CATALOGUE_ID
+              ValueFrom: !Sub '${CatalogueReader}:NUKHBAPAY_STAGING_CATALOGUE_ID::'
+          MountPoints:
+            - SourceVolume: snapshot
+              ContainerPath: /restore
+              ReadOnly: true
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref RestoreLogs
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: restore
+
+Outputs:
+  TaskDefinition:
+    Value: !Ref RestoreTask
+  CatalogueSecretArn:
+    Value: !Ref CatalogueReader

@@ -1,20 +1,20 @@
 [CmdletBinding()]
 param([switch]$ForStartup, [switch]$Check, [switch]$Rehearse, [switch]$ImportFinxplor, [switch]$Full, [switch]$Global, [switch]$RehearseImport, [switch]$CheckFinxplorCost, [switch]$InspectFinxplor, [switch]$VerifyFinxplorCoverage, [switch]$VerifyFinxplorLayer1, [switch]$RefreshFinxplorPrices, [switch]$RefreshFinxplorPricesNow, [switch]$RefreshFinxplorArtwork,
-  [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$')][string]$ProductId)
+  [switch]$VerifyIpay, [switch]$SyncIpay, [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$')][string]$ProductId)
 
 $ErrorActionPreference = 'Stop'
 if ($CheckFinxplorCost) { throw 'AED_NORMALIZATION_UNAVAILABLE: AED acquisition-cost normalization is unavailable during the Layer 1 rebuild.' }
 if ($Global) { $Full = $true; $ImportFinxplor = $true }
-$providerOperations = @($ImportFinxplor, $InspectFinxplor, $VerifyFinxplorCoverage, $VerifyFinxplorLayer1, $RefreshFinxplorPrices, $RefreshFinxplorPricesNow, $RefreshFinxplorArtwork | Where-Object { $_ })
+$providerOperations = @($ImportFinxplor, $InspectFinxplor, $VerifyFinxplorCoverage, $VerifyFinxplorLayer1, $RefreshFinxplorPrices, $RefreshFinxplorPricesNow, $RefreshFinxplorArtwork, $VerifyIpay, $SyncIpay | Where-Object { $_ })
 if ($providerOperations.Count -gt 1 -or ($providerOperations.Count -eq 1 -and ($ForStartup -or $Check -or $Rehearse))) {
   throw 'Select one catalogue operation.'
 }
-$finxplorOperation = $providerOperations.Count -eq 1
+$providerOperation = $providerOperations.Count -eq 1
 if ($Full -and !$ImportFinxplor) { throw 'Full import requires ImportFinxplor.' }
 if ($RehearseImport -and !$Full) { throw 'Import rehearsal requires Full.' }
 if (($InspectFinxplor -or $VerifyFinxplorCoverage) -and !$ProductId) { throw 'Inspection requires a product ID.' }
 if ($ProductId -and (!$InspectFinxplor -and !$VerifyFinxplorCoverage -and (!$ImportFinxplor -or $Full))) { throw 'Select a read-only product operation.' }
-if (!$ForStartup -and !$Check -and !$Rehearse -and !$finxplorOperation) { $Host.UI.RawUI.WindowTitle = 'NukhbaPay | Private local catalogue setup' }
+if (!$ForStartup -and !$Check -and !$Rehearse -and !$providerOperation) { $Host.UI.RawUI.WindowTitle = 'NukhbaPay | Private local catalogue setup' }
 $project = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $vault = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Nukhbapay\staff-portal'
 $profile = Join-Path $vault 'windows-catalogue.clixml'
@@ -112,7 +112,7 @@ try {
     $qualified = $receipt.status -ceq 'verified' -and $receipt.foundationInstalled -eq $true -and $receipt.backendReaderVerified -eq $true
   }
   $refreshPhase = 'catalogue installation receipt'
-  if (($Check -or $Rehearse -or $finxplorOperation) -and !$qualified) { throw 'The local catalogue database needs first-time setup.' }
+  if (($Check -or $Rehearse -or $providerOperation) -and !$qualified) { throw 'The local catalogue database needs first-time setup.' }
   $refreshPhase = 'protected catalogue credentials'
   if (!(Test-Path -LiteralPath $vault)) {
     if ($qualified) { throw 'The protected catalogue credential vault is missing.' }
@@ -166,7 +166,7 @@ try {
   }
   $rolesForProcess = $roles
   if ($qualified) { $rolesForProcess = @('nukhbapay_catalogue_reader', 'nukhbapay_catalogue_migrator') }
-  if ($finxplorOperation) { $rolesForProcess = @('nukhbapay_catalogue_runtime') }
+  if ($providerOperation) { $rolesForProcess = @('nukhbapay_catalogue_runtime') }
   if ($VerifyFinxplorCoverage) { $rolesForProcess = @('nukhbapay_catalogue_reader') }
   foreach ($role in $rolesForProcess) {
     if ($settings.Credentials[$role] -isnot [Security.SecureString] -or $settings.Credentials[$role].Length -ne 64) {
@@ -184,7 +184,9 @@ try {
   $launch.FileName = $client
   $launch.WorkingDirectory = $project
   $launch.Arguments = 'scripts/local-catalogue-setup.mjs'
-  if ($InspectFinxplor) { $launch.Arguments = 'scripts/import-finxplor-pilot.mjs --inspect ' + $ProductId }
+  if ($VerifyIpay) { $launch.Arguments = 'scripts/import-ipay-catalogue.mjs --check' }
+  elseif ($SyncIpay) { $launch.Arguments = 'scripts/import-ipay-catalogue.mjs --sync' }
+  elseif ($InspectFinxplor) { $launch.Arguments = 'scripts/import-finxplor-pilot.mjs --inspect ' + $ProductId }
   elseif ($RefreshFinxplorArtwork) { $launch.Arguments = 'scripts/import-finxplor-pilot.mjs --refresh-artwork' }
   elseif ($RefreshFinxplorPricesNow) { $launch.Arguments = 'scripts/import-finxplor-pilot.mjs --refresh-prices-now' }
   elseif ($RefreshFinxplorPrices) { $launch.Arguments = 'scripts/import-finxplor-pilot.mjs --refresh-prices' }
@@ -282,7 +284,7 @@ try {
     }
     throw 'Full catalogue refresh stopped. Check the sanitized local receipt.'
   }
-  if ($ForStartup -or $Check -or $Rehearse -or $finxplorOperation) { throw }
+  if ($ForStartup -or $Check -or $Rehearse -or $providerOperation) { throw }
   if (!$qualified) { Set-Content -LiteralPath $status -Value 'catalogue-setup-stopped' }
   Write-Host 'Catalogue setup stopped. Check the message above before retrying in this window.'
 } finally {
@@ -290,4 +292,4 @@ try {
   if ($admin) { $admin.Dispose() }
   if ($settings) { foreach ($credential in $settings.Credentials.Values) { $credential.Dispose() } }
 }
-if (!$ForStartup -and !$Check -and !$Rehearse -and !$finxplorOperation) { [void](Read-Host 'Press Enter to close this private window') }
+if (!$ForStartup -and !$Check -and !$Rehearse -and !$providerOperation) { [void](Read-Host 'Press Enter to close this private window') }
