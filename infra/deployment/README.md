@@ -80,7 +80,9 @@ workloads.
   The ALB serves HTTPS on the staging hostname. Its security group is the only
   ingress source for the application's port 8080. The single Fargate task uses
   public IPv4 for outbound access in staging. PostgreSQL remains in its private
-  subnets. This keeps staging independent of a NAT gateway.
+  subnets. This keeps staging independent of a NAT gateway. With the Auth0
+  parameter empty, the service starts only the kiosk, with its assets and
+  health check. In this mode the task receives no database or Auth0 credentials.
 
 ## Push to staging
 
@@ -91,10 +93,11 @@ sequence of pushes can supersede older candidate releases. The application
 rollout reuses the existing RDS database. Apply approved schema changes with
 the designated deployment task.
 
-The release stack starts in build-only mode. After the ECS staff service is
+The release stack starts in build-only mode. After the ECS service is
 healthy, update the stack with `StaffExecutionRoleArn` from the staging
 service stack. That enables the ECS deploy action with permission to update
-only the staging `staff` service and pass only its task execution role.
+only the staging `staff` service and pass only its task execution role. The
+ECS action inherits the service's current kiosk or staff configuration.
 
 Validate and deploy each template to the named project. For example:
 

@@ -12,23 +12,42 @@ Parameters:
     Type: AWS::EC2::SecurityGroup::Id
   DatabaseHost:
     Type: String
+    Default: ''
   CertificateArn:
     Type: String
   RuntimeSecretArn:
     Type: String
+    Default: ''
     Description: Staging-only restricted staff database credentials.
   CatalogueSecretArn:
     Type: String
+    Default: ''
     Description: Read-only staging catalogue database credentials.
   Auth0SecretArn:
     Type: String
+    Default: ''
     Description: Existing Auth0 test application client secret for the staging portal.
   StaffTenantId:
     Type: String
-    AllowedPattern: '[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}'
+    Default: ''
+    AllowedPattern: '^$|^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$'
   ImageDigest:
     Type: String
     AllowedPattern: 'sha256:[a-f0-9]{64}'
+
+Rules:
+  StaffSettings:
+    RuleCondition: !Not [!Equals [!Ref Auth0SecretArn, '']]
+    Assertions:
+      - Assert: !And
+          - !Not [!Equals [!Ref DatabaseHost, '']]
+          - !Not [!Equals [!Ref RuntimeSecretArn, '']]
+          - !Not [!Equals [!Ref CatalogueSecretArn, '']]
+          - !Not [!Equals [!Ref StaffTenantId, '']]
+        AssertDescription: Staff sign-in requires the staging database, its restricted secrets, and the tenant ID.
+
+Conditions:
+  StaffConfigured: !Not [!Equals [!Ref Auth0SecretArn, '']]
 
 Resources:
   LoadBalancerSecurityGroup:
@@ -89,6 +108,20 @@ Resources:
       Conditions:
         - Field: host-header
           Values: [staging.nukhbapay.com]
+        - Field: path-pattern
+          Values: [/kiosk, /kiosk/, /kiosk-*/*]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref StaffTargets
+  StaffHost:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Condition: StaffConfigured
+    Properties:
+      ListenerArn: !Ref SecureListener
+      Priority: 20
+      Conditions:
+        - Field: host-header
+          Values: [staging.nukhbapay.com]
       Actions:
         - Type: forward
           TargetGroupArn: !Ref StaffTargets
@@ -116,9 +149,12 @@ Resources:
               - Effect: Allow
                 Action: [logs:CreateLogStream, logs:PutLogEvents]
                 Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/nukhbapay/staging/staff:*'
-              - Effect: Allow
-                Action: secretsmanager:GetSecretValue
-                Resource: [!Ref RuntimeSecretArn, !Ref CatalogueSecretArn, !Ref Auth0SecretArn]
+              - !If
+                - StaffConfigured
+                - Effect: Allow
+                  Action: secretsmanager:GetSecretValue
+                  Resource: [!Ref RuntimeSecretArn, !Ref CatalogueSecretArn, !Ref Auth0SecretArn]
+                - !Ref AWS::NoValue
   StaffTask:
     Type: AWS::ECS::TaskDefinition
     Properties:
@@ -131,37 +167,42 @@ Resources:
       ContainerDefinitions:
         - Name: staff
           Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.${AWS::URLSuffix}/nukhbapay/staging-app@${ImageDigest}'
+          Command: !If [StaffConfigured, !Ref 'AWS::NoValue', [node, scripts/start-aws-staging-kiosk.mjs]]
           PortMappings:
             - ContainerPort: 8080
               Protocol: tcp
-          Environment:
-            - Name: NUKHBAPAY_STAGING_RDS_HOST
-              Value: !Ref DatabaseHost
-            - Name: NUKHBAPAY_STAFF_AUTH0_ACCESS_TOKEN_AUDIENCE_MODE
-              Value: api-and-userinfo
-            - Name: NUKHBAPAY_STAFF_AUTH0_ISSUER
-              Value: https://dev-whz1tr4aj20nxswq.us.auth0.com/
-            - Name: NUKHBAPAY_STAFF_AUTH0_CLIENT_ID
-              Value: TBbIOZVfqVisv5S3xebFXSfBQfXsaEwu
-            - Name: NUKHBAPAY_STAFF_AUTH0_AUDIENCE
-              Value: https://api.dev.nukhbapay.com/staff
-            - Name: NUKHBAPAY_STAFF_AUTH0_STAFF_KIND_CLAIM
-              Value: https://claims.nukhbapay.com/principal
-            - Name: NUKHBAPAY_STAFF_AUTH0_TENANT_ID
-              Value: !Ref StaffTenantId
-          Secrets:
-            - Name: DB_IDENTITY_READER_URL
-              ValueFrom: !Sub '${RuntimeSecretArn}:DB_IDENTITY_READER_URL::'
-            - Name: DB_IDENTITY_WRITER_URL
-              ValueFrom: !Sub '${RuntimeSecretArn}:DB_IDENTITY_WRITER_URL::'
-            - Name: DB_STAFF_SESSION_URL
-              ValueFrom: !Sub '${RuntimeSecretArn}:DB_STAFF_SESSION_URL::'
-            - Name: DB_LOCAL_CATALOGUE_READER_PASSWORD
-              ValueFrom: !Sub '${CatalogueSecretArn}:DB_LOCAL_CATALOGUE_READER_PASSWORD::'
-            - Name: NUKHBAPAY_STAGING_CATALOGUE_ID
-              ValueFrom: !Sub '${CatalogueSecretArn}:NUKHBAPAY_STAGING_CATALOGUE_ID::'
-            - Name: NUKHBAPAY_STAFF_AUTH0_CLIENT_SECRET
-              ValueFrom: !Sub '${Auth0SecretArn}:NUKHBAPAY_STAFF_AUTH0_CLIENT_SECRET::'
+          Environment: !If
+            - StaffConfigured
+            - - Name: NUKHBAPAY_STAGING_RDS_HOST
+                Value: !Ref DatabaseHost
+              - Name: NUKHBAPAY_STAFF_AUTH0_ACCESS_TOKEN_AUDIENCE_MODE
+                Value: api-and-userinfo
+              - Name: NUKHBAPAY_STAFF_AUTH0_ISSUER
+                Value: https://dev-whz1tr4aj20nxswq.us.auth0.com/
+              - Name: NUKHBAPAY_STAFF_AUTH0_CLIENT_ID
+                Value: TBbIOZVfqVisv5S3xebFXSfBQfXsaEwu
+              - Name: NUKHBAPAY_STAFF_AUTH0_AUDIENCE
+                Value: https://api.dev.nukhbapay.com/staff
+              - Name: NUKHBAPAY_STAFF_AUTH0_STAFF_KIND_CLAIM
+                Value: https://claims.nukhbapay.com/principal
+              - Name: NUKHBAPAY_STAFF_AUTH0_TENANT_ID
+                Value: !Ref StaffTenantId
+            - !Ref AWS::NoValue
+          Secrets: !If
+            - StaffConfigured
+            - - Name: DB_IDENTITY_READER_URL
+                ValueFrom: !Sub '${RuntimeSecretArn}:DB_IDENTITY_READER_URL::'
+              - Name: DB_IDENTITY_WRITER_URL
+                ValueFrom: !Sub '${RuntimeSecretArn}:DB_IDENTITY_WRITER_URL::'
+              - Name: DB_STAFF_SESSION_URL
+                ValueFrom: !Sub '${RuntimeSecretArn}:DB_STAFF_SESSION_URL::'
+              - Name: DB_LOCAL_CATALOGUE_READER_PASSWORD
+                ValueFrom: !Sub '${CatalogueSecretArn}:DB_LOCAL_CATALOGUE_READER_PASSWORD::'
+              - Name: NUKHBAPAY_STAGING_CATALOGUE_ID
+                ValueFrom: !Sub '${CatalogueSecretArn}:NUKHBAPAY_STAGING_CATALOGUE_ID::'
+              - Name: NUKHBAPAY_STAFF_AUTH0_CLIENT_SECRET
+                ValueFrom: !Sub '${Auth0SecretArn}:NUKHBAPAY_STAFF_AUTH0_CLIENT_SECRET::'
+            - !Ref AWS::NoValue
           LogConfiguration:
             LogDriver: awslogs
             Options:
