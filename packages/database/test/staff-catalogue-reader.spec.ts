@@ -6,7 +6,7 @@ import { attestVerifiedStaffIdentity } from '@nukhbapay/application/verified-ide
 import type { Pool } from 'pg';
 import { createStaffCatalogueReader } from '../src/staff-catalogue-reader.js';
 
-function fixture() {
+function fixture(configuredServices = true) {
   const tenant = randomUUID(), staff = randomUUID(), product = randomUUID();
   const seen: { query: string; parameters: unknown[] }[] = [];
   const releases: boolean[] = [];
@@ -21,6 +21,9 @@ function fixture() {
           return { command: 'COMMIT', rows: [] };
         }
         if (query.includes('DISTINCT provider_code')) return { rows: [{ provider_code: 'synthetic' }] };
+        if (query.includes('SELECT DISTINCT a.provider_code')) {
+          return { rows: [{ provider_code: 'FINXPLOR' }, { provider_code: 'IPAY' }] };
+        }
         if (query.includes('FROM nukhabapay.products')) {
           return { rows: [{ id: product, name: 'Card', country: 'AE', service: 'DIGITAL_PIN' }] };
         }
@@ -41,10 +44,10 @@ function fixture() {
       },
     }),
   } as unknown as Pool;
-  const read = createStaffCatalogueReader(pool, new Map([[tenant, [
+  const read = createStaffCatalogueReader(pool, new Map([[tenant, configuredServices ? [
     { country: 'AE', service: 'DIGITAL_PIN', providerId: 'synthetic', enabled: true },
     { country: 'SA', service: 'DIGITAL_PIN', providerId: 'missing', enabled: true },
-  ]]]));
+  ] : []]]), { localDiscoveries: !configuredServices });
   // Future policy double exercises only the adapter. Deployment uses the fixed permission catalogue.
   const service = new StaffCatalogueService({
     authority: { require: async (_identity, scope, permission) => ({
@@ -84,6 +87,19 @@ test('durable reads consume scoped tickets and basic views avoid selecting provi
   assert.equal(f.audits(), 1);
   const countries = await f.service.read(f.identity, f.tenant, 'countries', { group: 'GCC' });
   assert.equal(countries.items.find(row => row.id === 'SA')?.['configured'], false);
+});
+
+test('an enrolled tenant can read imported providers with no configured services', async () => {
+  const f = fixture(false);
+  await assert.rejects(f.service.read(f.identity, randomUUID(), 'discovery-providers', {}), { status: 403 });
+  assert.equal(f.seen.length, 0);
+  const result = await f.service.read(f.identity, f.tenant, 'discovery-providers', { sort: 'name', limit: '50' });
+  assert.deepEqual(result.items.map(row => ({ id: row.id, imported: row['hasDiscoveries'] })), [
+    { id: 'FINXPLOR', imported: true }, { id: 'IPAY', imported: true },
+  ]);
+  assert.equal(result['hasConfiguredServices'], false);
+  assert.ok(f.seen.some(call => call.query.includes('SELECT DISTINCT a.provider_code') && call.parameters[0] === f.tenant));
+  assert.equal(f.audits(), 1);
 });
 
 test('private stored economics preserve exact amounts and require fresh pricing authority and audit', async () => {

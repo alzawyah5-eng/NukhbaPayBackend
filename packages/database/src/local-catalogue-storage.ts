@@ -13,8 +13,11 @@ export async function createLocalCatalogueStorage(
   return openCatalogueStorage(config,availability);
 }
 
-export async function createAwsStagingCatalogueStorage(config:CatalogueStorageSettings, target:AwsStagingTarget) {
-  return openCatalogueStorage(config,new Map(),target);
+export async function createAwsStagingCatalogueStorage(
+  config:CatalogueStorageSettings & Readonly<{tenantId:string}>, target:AwsStagingTarget,
+) {
+  if (!administrationUuid.test(config.tenantId)) throw new Error('Invalid staging catalogue tenant');
+  return openCatalogueStorage(config,new Map([[config.tenantId,[]]]),target);
 }
 
 async function openCatalogueStorage(config:CatalogueStorageSettings,

@@ -32,7 +32,7 @@ try {
     expectedRole:'nukhabapay_session_backend',expectedDatabase:'nukhbapay_staff',connectionString:env.DB_STAFF_SESSION_URL,
   },target);
   catalogue=await createAwsStagingCatalogueStorage({
-    setupId:env.NUKHBAPAY_STAGING_CATALOGUE_ID,password:env.DB_LOCAL_CATALOGUE_READER_PASSWORD,
+    setupId:env.NUKHBAPAY_STAGING_CATALOGUE_ID,password:env.DB_LOCAL_CATALOGUE_READER_PASSWORD,tenantId:auth.tenantId,
   },target);
   reader=createIdentityReaderPool(identity,identity,client=>verifyAwsStagingConnection(client,identity.database,identity.readerRole),target.poolOptions);
   writer=createIdentityWriterPool(identity,identity,client=>verifyAwsStagingConnection(client,identity.database,identity.writerRole),target.poolOptions);

@@ -91,7 +91,7 @@ try {
   const { counts, migrated } = await importStagingCatalogue(catalogue,backup);
   await catalogue.query(`GRANT CONNECT ON DATABASE ${database} TO ${reader}`);
   stage = 'verify restricted catalogue read';
-  storage = await createAwsStagingCatalogueStorage({setupId,password:readerPassword},target);
+  storage = await createAwsStagingCatalogueStorage({setupId,password:readerPassword,tenantId:backup.snapshot.tenantId},target);
   if (!await storage.checkReadiness()) throw new Error('Staging catalogue reader is unavailable');
   const verify = new Client({...config,user:reader,password:readerPassword,database});
   try {
